@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<!-- Standalone HKU-MARS search port; no ROS runtime, flight-controller or sensor-driver dependency. -->
+<package format="3">
+  <name>path_searching</name>
+  <version>0.1.0</version>
+  <description>Kinodynamic A* and two-bank accumulated point-cloud collision map.</description>
+  <maintainer email="LostPatrol@users.noreply.github.com">LostPatrol</maintainer>
+  <author email="kongfz@connect.hku.hk">kongfz (upstream)</author>
+  <license>GPL-3.0-only</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>eigen</depend>
+  <depend>libpcl-all-dev</depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

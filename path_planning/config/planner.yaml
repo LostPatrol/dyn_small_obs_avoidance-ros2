@@ -1,0 +1,27 @@
+# Generic defaults; inputs must share the planning frame. No sensor or vehicle is launched.
+path_planning:
+  ros__parameters:
+    planning_frame: camera_init
+    planning_rate: 10.0
+    input_timeout: 0.5
+    stamp_clock: ros  # ros: validate header age; receive: explicitly accept unknown sensor-clock offset
+    odometry_twist_in_body: true  # nav_msgs/Odometry twist is expressed in child_frame_id
+    sample_step: 0.02
+    search.max_tau: 0.6
+    search.init_max_tau: 0.8
+    search.max_vel: 2.0
+    search.max_acc: 2.0
+    search.w_time: 10.0
+    search.horizon: 100.0
+    search.lambda_heu: 5.0
+    search.resolution: 0.1
+    search.time_resolution: 0.8
+    search.safe_distance: 0.45
+    search.voxel_size: 0.1
+    search.collision_step: 0.05
+    search.search_budget: 0.08
+    search.allocate_num: 100000
+    search.tree_period: 50
+    search.max_cloud_points: 500000
+    search.lower: [-50.0, -50.0, 0.2]
+    search.upper: [50.0, 50.0, 10.0]

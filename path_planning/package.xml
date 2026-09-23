@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<!-- ROS2 planning wrapper only; deliberately independent of vehicles and sensor drivers. -->
+<package format="3">
+  <name>path_planning</name><version>0.1.0</version>
+  <description>ROS2 Jazzy wrapper for the HKU-MARS kinodynamic obstacle avoidance search.</description>
+  <maintainer email="LostPatrol@users.noreply.github.com">LostPatrol</maintainer>
+  <license>GPL-3.0-only</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+  <depend>rclcpp</depend><depend>path_searching</depend><depend>pcl_conversions</depend>
+  <depend>nav_msgs</depend><depend>sensor_msgs</depend><depend>geometry_msgs</depend>
+  <depend>std_msgs</depend><depend>builtin_interfaces</depend><depend>trajectory_msgs</depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <exec_depend>launch_ros</exec_depend><exec_depend>ament_index_python</exec_depend>
+  <test_depend>ament_cmake_pytest</test_depend><test_depend>rclpy</test_depend>
+  <test_depend>sensor_msgs_py</test_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+  <export><build_type>ament_cmake</build_type></export>
+</package>
