@@ -14,6 +14,15 @@ using Result = path_planning::msg::PlanResult;
 using Clock = std::chrono::steady_clock;
 using Vector = Eigen::Vector3d;
 
+namespace {
+constexpr double kMaxPlanningRateHz = 1000.0;  // Configuration guard, not an achievable-rate promise.
+constexpr double kFutureStampToleranceSeconds = 0.05;  // Small source/host clock lead accepted in ros mode.
+constexpr double kQuaternionNormTolerance = 0.01;  // Dimensionless; accepted quaternions are normalized.
+constexpr uint32_t kNanosecondsPerSecond = 1000000000u;  // ROS time requires nanosec in [0, 1e9).
+constexpr uint32_t kFloat32Bytes = 4;  // PointField::FLOAT32 wire width, independent of struct padding.
+constexpr uint32_t kXyzFieldCount = 3;  // Required scalar x/y/z; other fields may coexist.
+}  // namespace
+
 // Single executor serializes map updates and searches; depth-one subscriptions bound backlog.
 class Planner : public rclcpp::Node {
  public:
@@ -39,7 +48,7 @@ class Planner : public rclcpp::Node {
     rate_=declare_parameter("planning_rate",10.0); timeout_=declare_parameter("input_timeout",0.5);
     step_=declare_parameter("sample_step",0.02); stamp_clock_=declare_parameter("stamp_clock","ros");
     body_twist_=declare_parameter("odometry_twist_in_body",true);
-    if (frame_.empty() || !positive(rate_) || rate_>1000 || !positive(timeout_) || !positive(step_) ||
+    if (frame_.empty() || !positive(rate_) || rate_>kMaxPlanningRateHz || !positive(timeout_) || !positive(step_) ||
         (stamp_clock_!="ros" && stamp_clock_!="receive")) throw std::invalid_argument("invalid wrapper parameters");
     // Best-effort subscribers match either sensor reliability policy. Results/goals are reliable
     // and volatile: a newly connected consumer must wait for a fresh result rather than a latched path.
@@ -62,7 +71,7 @@ class Planner : public rclcpp::Node {
   static Vector vec(const geometry_msgs::msg::Vector3& p) { return {p.x,p.y,p.z}; }
   bool correctFrame(const std_msgs::msg::Header& h) const { return h.frame_id==frame_; }
   static bool validStamp(const builtin_interfaces::msg::Time& stamp) {
-    return stamp.sec>=0 && stamp.nanosec<1000000000u;
+    return stamp.sec>=0 && stamp.nanosec<kNanosecondsPerSecond;
   }
   // Reception timeout always uses steady time, including paused simulation playback.
   // "ros" additionally checks source age; "receive" cannot detect sensor-side delay/clock offset.
@@ -70,7 +79,7 @@ class Planner : public rclcpp::Node {
     if (std::chrono::duration<double>(Clock::now()-received).count()>timeout_) return false;
     if (stamp_clock_=="receive") return true;
     const double age=(now()-rclcpp::Time(stamp)).seconds();
-    return age>=-0.05 && age<=timeout_;
+    return age>=-kFutureStampToleranceSeconds && age<=timeout_;
   }
   // Drop geometry as well as readiness: recovery starts a new accumulation window.
   void invalidateCloud(uint8_t status, const std::string& detail) {
@@ -87,12 +96,12 @@ class Planner : public rclcpp::Node {
     }
     last_cloud_stamp_=stamp; have_cloud_stamp_=true;
     const uint64_t count=uint64_t(m.width)*m.height;
-    bool valid=count>0 && count<=core_->config().max_cloud_points && !m.is_bigendian && m.point_step>=12 &&
+    bool valid=count>0 && count<=core_->config().max_cloud_points && !m.is_bigendian && m.point_step>=kXyzFieldCount*kFloat32Bytes &&
         uint64_t(m.row_step)>=uint64_t(m.width)*m.point_step && m.data.size()==uint64_t(m.row_step)*m.height;
     for (const auto* name:{"x","y","z"}) {
       bool found=false;
       for (const auto& f:m.fields) if (f.name==name && f.datatype==sensor_msgs::msg::PointField::FLOAT32 &&
-          f.count==1 && uint64_t(f.offset)+4<=m.point_step) found=true;
+          f.count==1 && uint64_t(f.offset)+kFloat32Bytes<=m.point_step) found=true;
       valid=valid && found;
     }
     if (!valid) { invalidateCloud(Result::INVALID_INPUT,"empty, oversized or malformed XYZ cloud"); return; }
@@ -120,7 +129,7 @@ class Planner : public rclcpp::Node {
     const auto& q=m.pose.pose.orientation;
     Eigen::Quaterniond rotation(q.w,q.x,q.y,q.z);
     if (!position_.allFinite() || !velocity_.allFinite() || !rotation.coeffs().allFinite() ||
-        std::abs(rotation.norm()-1)>0.01 || (body_twist_ && m.child_frame_id.empty())) {
+        std::abs(rotation.norm()-1)>kQuaternionNormTolerance || (body_twist_ && m.child_frame_id.empty())) {
       odom_status_=Result::INVALID_INPUT; return;
     }
     rotation.normalize(); if (body_twist_) velocity_=rotation*velocity_;

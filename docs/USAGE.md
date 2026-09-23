@@ -115,6 +115,18 @@ ros2 topic echo /plan_result
 目标与输出：RELIABLE/VOLATILE/depth 1，不保留旧规划供晚加入的消费者误用。
 参数在启动时读取；修改配置后重启节点。
 
+配置模板逐项标注了单位、约束与主要影响。`search.*` 默认值也在
+[`SearchConfig`](../path_searching/include/path_searching/kinodynamic_astar.h) 中提供，
+便于直接调用C++库；维护默认值时应同时核对YAML与头文件。
+初始固定加速度时长和时间索引分辨率只对核心库的相应搜索模式生效，模板已标明；
+它们不会让当前ROS节点自动启用动态障碍预测。
+
+搜索采样比例、终端连接时长重试、数值容差和资源上限等实现常量集中在两个
+`src/*.cpp` 文件顶部的匿名命名空间，并说明了用途。
+这些常量不是运行时参数；修改时应重新构建并运行回归测试。
+多项式求导的2/3/6等数学系数、XYZ维度和双树结构下标保留原公式写法，
+不将其误当作可调经验参数。
+
 默认每 100 ms 从最新有效实际里程计的 **位置和三轴速度** 重新搜索。
 不订阅原演示器的 `trajectory_time_index`，不从旧参考点伪造当前位置。
 Odometry 没有加速度字段，所以从上游的自由加速度原语分支开始，不假定实际加速度连续。
@@ -189,4 +201,3 @@ colcon test-result --test-result-base build-sanitized --verbose
 
 检测构建显式维持系统 PCL 的 Eigen 16 字节 malloc 对齐 ABI；没有关闭检测或屏蔽错误。
 自定义 AVX/PCL 构建应重新核对其对齐 ABI。
-

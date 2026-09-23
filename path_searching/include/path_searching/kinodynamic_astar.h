@@ -175,6 +175,8 @@ class KinodynamicAstar {
   double t_shot_ = 0.0;
   double max_tau_, init_max_tau_, max_vel_, max_acc_, w_time_, horizon_, lambda_heu_;
   int allocate_num_;
+  // Preserve upstream scoring: estimateHeuristic multiplies by (1 + tie_breaker_),
+  // so the effective factor is 2.0001, not just a 0.01% perturbation.
   double tie_breaker_ = 1.0 + 1.0 / 10000.0;
   double resolution_, inv_resolution_, time_resolution_, inv_time_resolution_;
   Eigen::Vector3d origin_;

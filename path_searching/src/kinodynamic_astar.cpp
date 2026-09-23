@@ -7,14 +7,36 @@
 using namespace std;
 using namespace Eigen;
 
+namespace {
+// Implementation policy, not runtime tuning knobs. Keep algebraic factors (2, 3, 6, ...)
+// in the polynomial formulas below: those follow from differentiation, not empirical tuning.
+constexpr double kMaxGridCellsPerAxis = 1e8;  // Limit the configured spatial-index range.
+constexpr double kMaxSearchBudgetSeconds = 60.0;  // Reject accidentally unbounded search budgets.
+constexpr double kMaxPrimitiveCollisionChecks = 1e6;  // Cap configured work per primitive.
+constexpr std::size_t kMaxTrajectorySamples = 1000000;  // Bound output allocation per sampling call.
+constexpr double kNearGoalDistanceMeters = 1.0;  // Per-axis voxel tolerance for attempting a shot.
+constexpr double kAccelerationStepFraction = 1.0 / 2.0;  // Five samples per axis, including zero.
+constexpr double kDurationStepFraction = 1.0;  // Regular primitives use the full max_tau.
+constexpr double kInitialDurationStepFraction = 1.0 / 20.0;  // Twenty fixed-acceleration durations.
+constexpr double kAccelerationLoopSlack = 1e-3;  // m/s²; preserve upstream inclusive loop endpoints.
+constexpr double kDurationLoopSlackSeconds = 1e-3;  // Same endpoint slack, but for initial durations.
+constexpr double kMinHeuristicTimeSeconds = 1e-3;  // Avoid singular cost at coincident endpoints.
+constexpr double kHeuristicVelocityFraction = 0.5;  // Upstream heuristic time lower-bound scale.
+constexpr double kInitialHeuristicCost = 100000000.0;  // Upstream finite sentinel; retain its behavior.
+constexpr double kAccelerationZeroTolerance = 1e-12;  // m/s²; skip division by near-zero primitive input.
+constexpr double kPolynomialZeroTolerance = 1e-12;  // SI coefficient magnitude for degenerate-root branches.
+constexpr double kDerivativeLimitSlack = 1e-9;  // Absolute numerical slack for velocity/acceleration limits.
+constexpr std::array<double, 5> kShotDurationScales{1.0, 1.5, 2.0, 3.0, 4.0};  // Bounded cubic retries.
+}  // namespace
+
 void SearchConfig::validate() const {
   for (double v : {max_tau, init_max_tau, max_vel, max_acc, w_time, horizon, lambda_heu,
                    resolution, time_resolution, safe_distance, voxel_size, collision_step, search_budget})
     if (!std::isfinite(v) || v <= 0) throw std::invalid_argument("search parameters must be finite and positive");
   if (allocate_num < 2 || tree_period < 1 || max_cloud_points < 1 || !lower.allFinite() || !upper.allFinite() ||
-      (lower.array() >= upper.array()).any() || ((upper-lower).array()/resolution > 1e8).any() ||
-      collision_step > safe_distance || search_budget > 60 ||
-      std::max(max_tau, init_max_tau)*std::sqrt(3.0)*max_vel/collision_step > 1e6)
+      (lower.array() >= upper.array()).any() || ((upper-lower).array()/resolution > kMaxGridCellsPerAxis).any() ||
+      collision_step > safe_distance || search_budget > kMaxSearchBudgetSeconds ||
+      std::max(max_tau, init_max_tau)*std::sqrt(3.0)*max_vel/collision_step > kMaxPrimitiveCollisionChecks)
     throw std::invalid_argument("invalid map bounds, capacities, sampling step or search budget");
 }
 
@@ -136,7 +158,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
 
   PathNodePtr terminate_node = NULL;
   bool init_search = init;
-  const int tolerance = ceil(1 / resolution_);
+  const int tolerance = ceil(kNearGoalDistanceMeters / resolution_);
 
   while (!open_set_.empty())
   {
@@ -163,7 +185,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
         estimateHeuristic(cur_node->state, end_state, time_to_goal);
         // The upstream heuristic time ignores derivative constraints. Retry the same cubic
         // boundary-value connection at longer durations, never accept an over-limit shot.
-        for (double scale : {1.0, 1.5, 2.0, 3.0, 4.0}) {
+        for (double scale : kShotDurationScales) {
           if (computeShotTraj(cur_node->state, end_state, time_to_goal * scale)) break;
         }
         if (std::chrono::steady_clock::now() >= deadline_) { reset(); return TIMEOUT; }
@@ -195,7 +217,8 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
     cur_node->node_state = IN_CLOSE_SET;
     iter_num_ += 1;
 
-    double res = 1 / 2.0, time_res = 1 / 1.0, time_res_init = 1 / 20.0;
+    const double res = kAccelerationStepFraction, time_res = kDurationStepFraction,
+                 time_res_init = kInitialDurationStepFraction;
     Eigen::Matrix<double, 6, 1> cur_state = cur_node->state;
     Eigen::Matrix<double, 6, 1> pro_state;
     vector<PathNodePtr> tmp_expand_nodes;
@@ -208,16 +231,16 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
     if (init_search)
     {
       inputs.push_back(start_acc_);
-      for (double tau = time_res_init * init_max_tau_; tau <= init_max_tau_ + 1e-3;
+      for (double tau = time_res_init * init_max_tau_; tau <= init_max_tau_ + kDurationLoopSlackSeconds;
            tau += time_res_init * init_max_tau_)
         durations.push_back(tau);
       init_search = false;
     }
     else
     {
-      for (double ax = -max_acc_; ax <= max_acc_ + 1e-3; ax += max_acc_ * res)
-        for (double ay = -max_acc_; ay <= max_acc_ + 1e-3; ay += max_acc_ * res)
-          for (double az = -max_acc_; az <= max_acc_ + 1e-3; az += max_acc_ * res)
+      for (double ax = -max_acc_; ax <= max_acc_ + kAccelerationLoopSlack; ax += max_acc_ * res)
+        for (double ay = -max_acc_; ay <= max_acc_ + kAccelerationLoopSlack; ay += max_acc_ * res)
+          for (double az = -max_acc_; az <= max_acc_ + kAccelerationLoopSlack; az += max_acc_ * res)
           {
             um << ax, ay, az;
             inputs.push_back(um);
@@ -239,7 +262,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
         // Endpoint checks alone miss a quadratic primitive that exits and returns inside the bounds.
         bool leaves_bounds = false;
         for (int axis=0; axis<3; ++axis) {
-          if (std::abs(um(axis)) < 1e-12) continue;
+          if (std::abs(um(axis)) < kAccelerationZeroTolerance) continue;
           const double t = -cur_state(axis+3)/um(axis);
           if (t>0 && t<tau) {
             const double p = cur_state(axis)+cur_state(axis+3)*t+0.5*um(axis)*t*t;
@@ -408,11 +431,11 @@ double KinodynamicAstar::estimateHeuristic(Eigen::VectorXd x1, Eigen::VectorXd x
 
   std::vector<double> ts = quartic(c5, c4, c3, c2, c1);
 
-  double v_max = max_vel_ * 0.5;
-  double t_bar = std::max(1e-3, (x1.head(3) - x2.head(3)).lpNorm<Infinity>() / v_max);
+  double v_max = max_vel_ * kHeuristicVelocityFraction;
+  double t_bar = std::max(kMinHeuristicTimeSeconds, (x1.head(3) - x2.head(3)).lpNorm<Infinity>() / v_max);
   ts.push_back(t_bar);
 
-  double cost = 100000000;
+  double cost = kInitialHeuristicCost;
   double t_d = t_bar;
 
   for (auto t : ts)
@@ -456,20 +479,20 @@ bool KinodynamicAstar::computeShotTraj(Eigen::VectorXd state1, Eigen::VectorXd s
   for (int axis = 0; axis < 3; ++axis) {
     const auto position = [&](double t) { return d(axis) + c(axis)*t + b(axis)*t*t + a(axis)*t*t*t; };
     const auto velocity = [&](double t) { return c(axis) + 2*b(axis)*t + 3*a(axis)*t*t; };
-    if (std::max(std::abs(2*b(axis)), std::abs(2*b(axis)+6*a(axis)*t_d)) > max_acc_ + 1e-9)
+    if (std::max(std::abs(2*b(axis)), std::abs(2*b(axis)+6*a(axis)*t_d)) > max_acc_ + kDerivativeLimitSlack)
       return false;
     std::vector<double> velocity_times{0.0, t_d};
-    if (std::abs(a(axis)) > 1e-12) velocity_times.push_back(-b(axis)/(3*a(axis)));
+    if (std::abs(a(axis)) > kPolynomialZeroTolerance) velocity_times.push_back(-b(axis)/(3*a(axis)));
     for (double t : velocity_times)
-      if (t >= 0 && t <= t_d && std::abs(velocity(t)) > max_vel_ + 1e-9) return false;
+      if (t >= 0 && t <= t_d && std::abs(velocity(t)) > max_vel_ + kDerivativeLimitSlack) return false;
     std::vector<double> position_times{0.0, t_d};
-    if (std::abs(a(axis)) > 1e-12) {
+    if (std::abs(a(axis)) > kPolynomialZeroTolerance) {
       const double disc = 4*b(axis)*b(axis)-12*a(axis)*c(axis);
       if (disc >= 0) {
         position_times.push_back((-2*b(axis)+std::sqrt(disc))/(6*a(axis)));
         position_times.push_back((-2*b(axis)-std::sqrt(disc))/(6*a(axis)));
       }
-    } else if (std::abs(b(axis)) > 1e-12) position_times.push_back(-c(axis)/(2*b(axis)));
+    } else if (std::abs(b(axis)) > kPolynomialZeroTolerance) position_times.push_back(-c(axis)/(2*b(axis)));
     for (double t : position_times)
       if (t >= 0 && t <= t_d && (position(t) < config_.lower(axis) || position(t) > config_.upper(axis)))
         return false;
@@ -614,7 +637,7 @@ std::vector<TrajectorySample> KinodynamicAstar::sampleTrajectory(double step) co
   double elapsed = 0;
   for (const auto& s : getSegments()) {
     const double count = std::ceil(s.duration/step);
-    if (count > 1000000 || out.size()+count+1 > 1000000) throw std::length_error("too many samples");
+    if (count > kMaxTrajectorySamples || out.size()+count+1 > kMaxTrajectorySamples) throw std::length_error("too many samples");
     // Divide each segment evenly so the endpoint is exact; omit the already-emitted shared start.
     const int n = std::max(1, static_cast<int>(count));
     for (int i = out.empty() ? 0 : 1; i <= n; ++i) {

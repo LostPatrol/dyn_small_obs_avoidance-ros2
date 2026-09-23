@@ -1,27 +1,58 @@
 # Generic defaults; inputs must share the planning frame. No sensor or vehicle is launched.
+# Values are read at startup: restart the node to apply edits. Units below are SI.
+# Bounds/clearance are example planning settings, not a calibrated vehicle safety envelope.
 path_planning:
   ros__parameters:
+    # Exact frame_id required on cloud, odometry pose and goal; this node does not perform TF transforms.
     planning_frame: camera_init
+    # Hz, finite and positive (at most 1000). Timer frequency is not a hard real-time guarantee.
     planning_rate: 10.0
+    # Seconds, >0: maximum steady-clock reception age for cloud and odometry.
+    # In ros mode the same limit also applies to header age; source time may lead by at most 0.05 s.
     input_timeout: 0.5
+    # receive mode preserves device timestamps but cannot measure upstream acquisition/transport delay.
     stamp_clock: ros  # ros: validate header age; receive: explicitly accept unknown sensor-clock offset
     odometry_twist_in_body: true  # nav_msgs/Odometry twist is expressed in child_frame_id
+    # Seconds, >0: maximum output sample interval. Exact segment endpoints are always included.
+    # Smaller values increase serialization/DDS cost; this does not set collision-check resolution.
     sample_step: 0.02
+
+    # Seconds, >0: regular acceleration-primitive duration; larger steps change search reach/granularity.
     search.max_tau: 0.6
+    # Seconds, >0: maximum initial fixed-acceleration primitive duration (20 candidate durations).
+    # Used by the core only for search(init=true); the ROS wrapper currently calls init=false.
     search.init_max_tau: 0.8
+    # m/s and m/s², >0, per axis. Euclidean limits can be sqrt(3) times these values.
     search.max_vel: 2.0
     search.max_acc: 2.0
+    # Positive time penalty in integral(||acceleration||² + w_time) dt; larger favors shorter durations.
     search.w_time: 10.0
+    # Meters, >0: displacement from start that permits a partial REACH_HORIZON result, not path length.
     search.horizon: 100.0
+    # Positive heuristic weight; larger favors heuristic-directed expansion, not guaranteed optimality.
     search.lambda_heu: 5.0
+    # Meters, >0: position hash cell size; distinct velocities can be merged within a spatial cell.
     search.resolution: 0.1
+    # Seconds, >0: hash time-bin width for core dynamic=true; unused by the current ROS wrapper.
     search.time_resolution: 0.8
+    # Meters, >0: clearance from obstacle points before conservative sampling/voxel compensation.
     search.safe_distance: 0.45
+    # Meters, >0: voxel edge for accumulated clouds. Larger values reduce detail and enlarge compensation.
     search.voxel_size: 0.1
+    # Meters, >0 and <=safe_distance: maximum travel interval between collision checks.
+    # Effective radius = safe_distance + sqrt(3)*voxel_size + collision_step/2 (~0.6482 m here).
     search.collision_step: 0.05
+    # Seconds, (0,60]: cooperative search budget, excluding map building and result serialization.
+    # The default leaves 20 ms of a nominal 100 ms period, but does not reserve CPU scheduling time.
     search.search_budget: 0.08
+    # At least 2 search nodes, preallocated at construction; exhausted searches return NODE_LIMIT.
     search.allocate_num: 100000
+    # Accepted clouds per bank, >=1. Two banks alternate; history lasts roughly 50-100 updates here.
+    # At 10 Hz this is about 5-10 seconds, not a time-based expiry or moving-object prediction.
     search.tree_period: 50
+    # >=1: cap on input-cloud size and combined filtered map size; exceeding it invalidates the map.
     search.max_cloud_points: 500000
+    # Meters: inclusive world-frame [x,y,z] bounds, each lower coordinate strictly below upper.
+    # Shared by primitives and terminal curves; this volume is not a sensor-coverage declaration.
     search.lower: [-50.0, -50.0, 0.2]
     search.upper: [50.0, 50.0, 10.0]
