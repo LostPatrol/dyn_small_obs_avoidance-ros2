@@ -81,6 +81,8 @@ bool KinodynamicAstar::isSafe(double x, double y, double z) {
   return true;
 }
 
+// Weighted A*: validate endpoints, expand constant-acceleration primitives, then try a terminal cubic.
+// Map updates must not run concurrently; all collision queries use the current two-bank snapshot.
 int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, Eigen::Vector3d start_a,
                              Eigen::Vector3d end_pt, Eigen::Vector3d end_v, bool init, bool dynamic, double time_start)
 {
@@ -139,6 +141,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
   while (!open_set_.empty())
   {
     if (std::chrono::steady_clock::now() >= deadline_) { reset(); return TIMEOUT; }
+    // A decreased score creates another queue entry; discard old snapshots before expanding.
     const auto entry = open_set_.top();
     cur_node = entry.node;
     if (cur_node->node_state != IN_OPEN_SET || entry.score != cur_node->f_score) {
@@ -150,6 +153,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
                     abs(cur_node->index(1) - end_index(1)) <= tolerance &&
                     abs(cur_node->index(2) - end_index(2)) <= tolerance;
 
+    // A horizon result is a useful local prefix, not proof of reaching or stopping at the goal.
     if (reach_horizon || near_end)
     {
       terminate_node = cur_node;
@@ -185,6 +189,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
         return REACH_END;
       }
     }
+    // A rejected near-goal shot must not leave a candidate path visible as a successful result.
     path_nodes_.clear();
     open_set_.pop();
     cur_node->node_state = IN_CLOSE_SET;
@@ -198,6 +203,8 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
     double pro_t;
     vector<Eigen::Vector3d> inputs;
     vector<double> durations;
+    // Initial mode preserves supplied acceleration only for this first expansion.
+    // Otherwise each axis samples five accelerations in [-max_acc_, max_acc_].
     if (init_search)
     {
       inputs.push_back(start_acc_);
@@ -229,6 +236,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
 
         Eigen::Vector3d pro_pos = pro_state.head(3);
         if (!inBounds(pro_pos)) continue;
+        // Endpoint checks alone miss a quadratic primitive that exits and returns inside the bounds.
         bool leaves_bounds = false;
         for (int axis=0; axis<3; ++axis) {
           if (std::abs(um(axis)) < 1e-12) continue;
@@ -288,6 +296,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
             continue;
         }
 
+        // Accumulated control-effort/time cost plus the weighted upstream terminal-cost heuristic.
         double time_to_goal, tmp_g_score, tmp_f_score;
         tmp_g_score = (um.squaredNorm() + w_time_) * tau + cur_node->g_score;
         tmp_f_score = tmp_g_score + lambda_heu_ * estimateHeuristic(pro_state, end_state, time_to_goal);
@@ -364,6 +373,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
   return NO_PATH;
 }
 
+// Parent links run backwards; expose an ordered start-to-terminal sequence without copying nodes.
 void KinodynamicAstar::retrievePath(PathNodePtr end_node)
 {
   PathNodePtr cur_node = end_node;
@@ -382,6 +392,8 @@ void KinodynamicAstar::retrievePath(PathNodePtr end_node)
   reverse(path_nodes_.begin(), path_nodes_.end());
 }
 
+// Minimize the unconstrained cubic connection cost over candidate positive durations.
+// The estimated time ignores obstacles and derivative limits; computeShotTraj must validate it.
 double KinodynamicAstar::estimateHeuristic(Eigen::VectorXd x1, Eigen::VectorXd x2, double& optimal_time)
 {
   const Vector3d dp = x2.head(3) - x1.head(3);
@@ -420,6 +432,7 @@ double KinodynamicAstar::estimateHeuristic(Eigen::VectorXd x1, Eigen::VectorXd x
   return 1.0 * (1 + tie_breaker_) * cost;
 }
 
+// Solve cubic coefficients from endpoint position/velocity. Only a fully checked shot is retained.
 bool KinodynamicAstar::computeShotTraj(Eigen::VectorXd state1, Eigen::VectorXd state2, double time_to_goal)
 {
   /* ---------- get coefficient ---------- */
@@ -474,6 +487,7 @@ bool KinodynamicAstar::computeShotTraj(Eigen::VectorXd state1, Eigen::VectorXd s
   return true;
 }
 
+// Upstream real-root helper for the quartic resolvent; internal callers supply nonzero a.
 vector<double> KinodynamicAstar::cubic(double a, double b, double c, double d)
 {
   vector<double> dts;
@@ -509,6 +523,8 @@ vector<double> KinodynamicAstar::cubic(double a, double b, double c, double d)
   }
 }
 
+// Upstream quartic solver for stationary points of the heuristic cost; a=w_time_>0.
+// The heuristic also tests a positive fallback duration and filters nonfinite candidates.
 vector<double> KinodynamicAstar::quartic(double a, double b, double c, double d, double e)
 {
   vector<double> dts;
@@ -563,6 +579,7 @@ int KinodynamicAstar::timeToIndex(double time)
   return static_cast<int>(std::floor((time - time_origin_) * inv_time_resolution_));
 }
 
+// Exact double-integrator step: p1=p0+v0*t+u*t²/2, v1=v0+u*t.
 void KinodynamicAstar::stateTransit(Eigen::Matrix<double, 6, 1>& state0, Eigen::Matrix<double, 6, 1>& state1,
                                     Eigen::Vector3d um, double tau)
 {
@@ -598,6 +615,7 @@ std::vector<TrajectorySample> KinodynamicAstar::sampleTrajectory(double step) co
   for (const auto& s : getSegments()) {
     const double count = std::ceil(s.duration/step);
     if (count > 1000000 || out.size()+count+1 > 1000000) throw std::length_error("too many samples");
+    // Divide each segment evenly so the endpoint is exact; omit the already-emitted shared start.
     const int n = std::max(1, static_cast<int>(count));
     for (int i = out.empty() ? 0 : 1; i <= n; ++i) {
       const double t = s.duration*i/n;

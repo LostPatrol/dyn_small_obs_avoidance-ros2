@@ -18,6 +18,8 @@ using Vector = Eigen::Vector3d;
 class Planner : public rclcpp::Node {
  public:
   Planner() : Node("path_planning") {
+    // Parameters are copied at startup; changing ROS parameter values later does not reconfigure
+    // these members. Restart with the desired configuration. Construction validates before subscribing.
     SearchConfig c;
 #define PARAM(field) c.field = declare_parameter("search." #field, c.field)
     PARAM(max_tau); PARAM(init_max_tau); PARAM(max_vel); PARAM(max_acc); PARAM(w_time);
@@ -39,6 +41,8 @@ class Planner : public rclcpp::Node {
     body_twist_=declare_parameter("odometry_twist_in_body",true);
     if (frame_.empty() || !positive(rate_) || rate_>1000 || !positive(timeout_) || !positive(step_) ||
         (stamp_clock_!="ros" && stamp_clock_!="receive")) throw std::invalid_argument("invalid wrapper parameters");
+    // Best-effort subscribers match either sensor reliability policy. Results/goals are reliable
+    // and volatile: a newly connected consumer must wait for a fresh result rather than a latched path.
     auto sensor_qos=rclcpp::SensorDataQoS().keep_last(1);
     cloud_sub_=create_subscription<sensor_msgs::msg::PointCloud2>("cloud",sensor_qos,
         [this](sensor_msgs::msg::PointCloud2::ConstSharedPtr m){ cloud(*m); });
@@ -60,12 +64,15 @@ class Planner : public rclcpp::Node {
   static bool validStamp(const builtin_interfaces::msg::Time& stamp) {
     return stamp.sec>=0 && stamp.nanosec<1000000000u;
   }
+  // Reception timeout always uses steady time, including paused simulation playback.
+  // "ros" additionally checks source age; "receive" cannot detect sensor-side delay/clock offset.
   bool fresh(Clock::time_point received, const builtin_interfaces::msg::Time& stamp) const {
     if (std::chrono::duration<double>(Clock::now()-received).count()>timeout_) return false;
     if (stamp_clock_=="receive") return true;
     const double age=(now()-rclcpp::Time(stamp)).seconds();
     return age>=-0.05 && age<=timeout_;
   }
+  // Drop geometry as well as readiness: recovery starts a new accumulation window.
   void invalidateCloud(uint8_t status, const std::string& detail) {
     core_->clearMap(); cloud_status_=status; cloud_detail_=detail;
   }
@@ -97,6 +104,9 @@ class Planner : public rclcpp::Node {
     if (!core_->setKdtree(points)) { invalidateCloud(Result::INVALID_INPUT,"nonfinite cloud or map capacity exceeded"); return; }
     cloud_received_=received; cloud_stamp_=m.header.stamp; cloud_status_=0;
   }
+  // Pose is already in the planning frame. By Odometry convention, twist is in child_frame_id;
+  // rotate its linear component using the pose orientation unless the producer explicitly uses world twist.
+  // Covariance/angular velocity are not used, and no interpolation to the cloud timestamp is performed.
   void odom(const nav_msgs::msg::Odometry& m) {
     if (!correctFrame(m.header)) { odom_status_=Result::FRAME_MISMATCH; return; }
     if (!validStamp(m.header.stamp)) { odom_status_=Result::INVALID_INPUT; return; }
@@ -117,6 +127,8 @@ class Planner : public rclcpp::Node {
     odom_received_=Clock::now(); odom_stamp_=m.header.stamp;
     odom_status_=fresh(odom_received_,odom_stamp_)?0:Result::STALE_INPUT;
   }
+  // Goals persist until replaced; only position/frame are consumed, not orientation or timestamp.
+  // Every received goal advances the revision, including repeated coordinates and invalid requests.
   void goal(const geometry_msgs::msg::PoseStamped& m) {
     ++goal_revision_;
     if (!correctFrame(m.header)) { goal_status_=Result::FRAME_MISMATCH; return; }
@@ -125,6 +137,8 @@ class Planner : public rclcpp::Node {
   }
   // Every attempt emits an atomic status; failure also emits an empty visualization path.
   void plan() {
+    // Readiness flags are internal: zero means valid input, not a published PlanResult status.
+    // The first failing gate determines the reported reason; this is not an aggregate diagnostic.
     Result result; result.header.stamp=now(); result.header.frame_id=frame_;
     result.sequence=++sequence_; result.goal_revision=goal_revision_;
     result.cloud_stamp=cloud_stamp_; result.odometry_stamp=odom_stamp_;
@@ -149,6 +163,8 @@ class Planner : public rclcpp::Node {
     nav_msgs::msg::Path path; path.header=result.header;
     result.trajectory.header=result.header; result.trajectory.joint_names={"position"};
     if (result.status==Result::REACH_END || result.status==Result::REACH_HORIZON) {
+      // Serialize exact search coefficients; the sampled trajectory and Path are views of these
+      // same curves, not separately interpolated paths. Identity orientation does not plan yaw.
       for (const auto& s:core_->getSegments()) {
         path_planning::msg::PolynomialSegment msg; msg.duration=s.duration;
         for (int i=0;i<4;++i) { msg.x[i]=s.coefficients(0,i); msg.y[i]=s.coefficients(1,i); msg.z[i]=s.coefficients(2,i); }
