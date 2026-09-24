@@ -186,6 +186,27 @@ Odometry 没有加速度字段，所以从上游的自由加速度原语分支�
 若输入包只有原始 LiDAR 而没有已配准点云/里程计，需先由外部 SLAM 生成，不能直接喂给搜索器。
 上游公开 ROS1 bag 链接在 2026-09-23 检查时返回 HTTP 404；本仓库未携带或声称验证该数据集。
 
+### Odin 实时台架
+
+现场 `/odin1/cloud_slam` 和 `/odin1/odometry` 均为 `odom` 坐标系、设备启动时间戳时使用：
+
+```bash
+source install/setup.bash
+ros2 launch path_planning odin.launch.py
+# 另一个已 source 的终端：
+ros2 topic pub --once /goal geometry_msgs/msg/PoseStamped \
+  '{header: {frame_id: odom}, pose: {position: {x: 4.0, y: 0.0, z: 1.0}, orientation: {w: 1.0}}}'
+ros2 topic echo /plan_result --field status
+ros2 topic echo /kino_path --once
+```
+
+专用启动文件覆盖 `planning_frame=odom`、`stamp_clock=receive` 和
+`search.lower=[-50,-50,-2]`（米），其余参数继承通用配置；不会启动传感器或飞控。
+下界用于包含初始位置附近的地面台架起点，不代表真实地面高度或允许飞行空间。
+接收时间模式不能判断传感器端积压延迟。目标必须使用 `odom`；输出是 `/kino_path`，有下划线。
+状态 1/2 才含轨迹，3 表示无路；即使配置正确，起点附近的地面或机体点也可能使安全距离检查失败。
+不能通过缩小安全距离或删除近身障碍物来宣称台架规划成功。
+
 ASan/UBSan（Ubuntu 24.04 系统 PCL，单独 build/install）：
 
 ```bash
