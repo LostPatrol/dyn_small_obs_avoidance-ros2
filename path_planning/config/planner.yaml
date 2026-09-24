@@ -51,8 +51,8 @@ path_planning:
     # Effective radius = safe_distance + sqrt(3)*voxel_size + collision_step/2 (~0.6482 m here).
     search.collision_step: 0.05
     # Seconds, (0,60]: cooperative search budget, excluding map building and result serialization.
-    # The default leaves 20 ms of a nominal 100 ms period, but does not reserve CPU scheduling time.
-    search.search_budget: 0.08
+    # A difficult search can exceed the nominal 100 ms timer period; 10 Hz output is not guaranteed.
+    search.search_budget: 0.3
     # At least 2 search nodes, preallocated at construction; exhausted searches return NODE_LIMIT.
     search.allocate_num: 100000
     # Accepted clouds per bank, >=1. Two banks alternate; history lasts roughly 50-100 updates here.
