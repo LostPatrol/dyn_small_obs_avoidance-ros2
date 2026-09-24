@@ -207,6 +207,31 @@ ros2 topic echo /kino_path --once
 状态 1/2 才含轨迹，3 表示无路；即使配置正确，起点附近的地面或机体点也可能使安全距离检查失败。
 不能通过缩小安全距离或删除近身障碍物来宣称台架规划成功。
 
+#### 可选近距离盲区
+
+通用配置 `cloud.blind_radius` 为三维球形半径（米），默认 `0.0` 关闭。
+Odin 入口用启动参数显式覆盖 YAML 中的半径，例如：
+
+```bash
+ros2 launch path_planning odin.launch.py blind_radius:=0.5
+```
+
+该配置用于接受传感器盲区的台架实验，不识别机体：球内真实障碍也会被忽略。
+它使用三维距离，不照搬上游 FAST_LIO 的 `sqrt(x*x+y*y)` 水平距离盲区。
+默认球心是里程计位姿原点；若与传感器原点不同，在 YAML 中设置
+`cloud.blind_origin_offset: [x,y,z]`（里程计 child 坐标系中的米制偏移），
+节点会按匹配姿态旋转该偏移。零偏移不意味着已标定 Odin IMU/雷达外参。
+
+每帧点云匹配最多256条有效历史里程计中时间戳最近的一条，最大时间差由
+`cloud.blind_pose_tolerance` 控制，默认0.05秒，不插值、不等待未来里程计。
+两路必须使用相同源时钟，即使选择 `stamp_clock=receive` 也是如此；不匹配时清空地图并报告状态。
+过滤发生在累计/体素化之前，只剔除严格小于半径的点，不随飞机移动重新挖除旧地图。
+全部点被滤掉时报告 `NO_MAP`，不会视为整片自由空间。
+
+RViz 添加 PointCloud2 订阅 `/filtered_cloud`，选择 Best Effort、FlatColor，可与原始点云比较。
+这是当前帧过滤后的 XYZ，不是累计地图。修改参数须重启；重启也会清除旧累计点。
+盲区半径与碰撞安全半径独立；配置0.5m盲区并不保证满足默认约0.648m安全半径，更不保证目标净空。
+
 ASan/UBSan（Ubuntu 24.04 系统 PCL，单独 build/install）：
 
 ```bash

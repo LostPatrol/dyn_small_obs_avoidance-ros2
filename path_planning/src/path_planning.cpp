@@ -9,6 +9,8 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <cmath>
 #include <limits>
+#include <algorithm>
+#include <deque>
 
 using Result = path_planning::msg::PlanResult;
 using Clock = std::chrono::steady_clock;
@@ -21,6 +23,7 @@ constexpr double kQuaternionNormTolerance = 0.01;  // Dimensionless; accepted qu
 constexpr uint32_t kNanosecondsPerSecond = 1000000000u;  // ROS time requires nanosec in [0, 1e9).
 constexpr uint32_t kFloat32Bytes = 4;  // PointField::FLOAT32 wire width, independent of struct padding.
 constexpr uint32_t kXyzFieldCount = 3;  // Required scalar x/y/z; other fields may coexist.
+constexpr size_t kBlindPoseHistorySize = 256;  // Bounded history (~0.64 s at 400 Hz).
 }  // namespace
 
 // Single executor serializes map updates and searches; depth-one subscriptions bound backlog.
@@ -48,6 +51,13 @@ class Planner : public rclcpp::Node {
     rate_=declare_parameter("planning_rate",10.0); timeout_=declare_parameter("input_timeout",0.5);
     step_=declare_parameter("sample_step",0.02); stamp_clock_=declare_parameter("stamp_clock","ros");
     body_twist_=declare_parameter("odometry_twist_in_body",true);
+    blind_radius_=declare_parameter("cloud.blind_radius",0.0);
+    blind_pose_tolerance_=declare_parameter("cloud.blind_pose_tolerance",0.05);
+    const auto offset=declare_parameter("cloud.blind_origin_offset",std::vector<double>{0,0,0});
+    if (offset.size()!=3) throw std::invalid_argument("blind_origin_offset requires three coordinates");
+    blind_offset_=Eigen::Map<const Vector>(offset.data());
+    if (!std::isfinite(blind_radius_) || blind_radius_<0 || !positive(blind_pose_tolerance_) ||
+        !blind_offset_.allFinite()) throw std::invalid_argument("invalid blind filter parameters");
     if (frame_.empty() || !positive(rate_) || rate_>kMaxPlanningRateHz || !positive(timeout_) || !positive(step_) ||
         (stamp_clock_!="ros" && stamp_clock_!="receive")) throw std::invalid_argument("invalid wrapper parameters");
     // Best-effort subscribers match either sensor reliability policy. Results/goals are reliable
@@ -61,6 +71,7 @@ class Planner : public rclcpp::Node {
         [this](geometry_msgs::msg::PoseStamped::ConstSharedPtr m){ goal(*m); });
     result_pub_=create_publisher<Result>("plan_result",rclcpp::QoS(1));
     path_pub_=create_publisher<nav_msgs::msg::Path>("kino_path",rclcpp::QoS(1));
+    filtered_pub_=create_publisher<sensor_msgs::msg::PointCloud2>("filtered_cloud",sensor_qos);
     timer_=create_wall_timer(std::chrono::duration<double>(1/rate_),[this]{ plan(); });
     RCLCPP_INFO(get_logger(),"Standalone planner ready: frame=%s, %.1f Hz, clock=%s",frame_.c_str(),rate_,stamp_clock_.c_str());
   }
@@ -110,7 +121,34 @@ class Planner : public rclcpp::Node {
     if (cloud_status_==0 && !fresh(cloud_received_,cloud_stamp_)) core_->clearMap();
     pcl::PointCloud<pcl::PointXYZ> points;
     pcl::fromROSMsg(m,points);
+    if (blind_radius_>0) {
+      // Registered points are already in the world frame. Match acquisition timestamps, not
+      // callback arrival times; both streams must share a source clock even in receive mode.
+      // A sphere needs only the sensor centre, including the rotated odometry-to-sensor offset.
+      if (odom_status_ || !fresh(odom_received_,odom_stamp_) || blind_poses_.empty()) {
+        invalidateCloud(Result::WAITING_FOR_INPUT,"blind filter needs fresh odometry"); return;
+      }
+      const auto pose=std::min_element(blind_poses_.begin(),blind_poses_.end(),
+          [stamp](const BlindPose& a,const BlindPose& b) {
+            return std::abs(a.stamp-stamp)<std::abs(b.stamp-stamp);
+          });
+      if (std::abs(pose->stamp-stamp)*1e-9>blind_pose_tolerance_) {
+        invalidateCloud(Result::STALE_INPUT,"blind filter has no time-matched odometry"); return;
+      }
+      // Nonfinite points must still be rejected by the core, never hidden by filtering.
+      points.erase(std::remove_if(points.begin(),points.end(),[&](const pcl::PointXYZ& p) {
+        const Vector point(p.x,p.y,p.z);
+        return point.allFinite() && (point-pose->origin).norm()<blind_radius_;
+      }),points.end());
+      if (points.empty()) {
+        sensor_msgs::msg::PointCloud2 filtered; pcl::toROSMsg(points,filtered);
+        filtered.header=m.header; filtered_pub_->publish(filtered);
+        invalidateCloud(Result::NO_MAP,"all cloud points removed by blind filter"); return;
+      }
+    }
     if (!core_->setKdtree(points)) { invalidateCloud(Result::INVALID_INPUT,"nonfinite cloud or map capacity exceeded"); return; }
+    sensor_msgs::msg::PointCloud2 filtered; pcl::toROSMsg(points,filtered);
+    filtered.header=m.header; filtered_pub_->publish(filtered);
     cloud_received_=received; cloud_stamp_=m.header.stamp; cloud_status_=0;
   }
   // Pose is already in the planning frame. By Odometry convention, twist is in child_frame_id;
@@ -121,7 +159,10 @@ class Planner : public rclcpp::Node {
     if (!validStamp(m.header.stamp)) { odom_status_=Result::INVALID_INPUT; return; }
     const int64_t stamp=rclcpp::Time(m.header.stamp).nanoseconds();
     if (have_odom_stamp_ && stamp<=last_odom_stamp_) {
-      if (stamp<last_odom_stamp_) { odom_status_=Result::STALE_INPUT; last_odom_stamp_=stamp; }
+      if (stamp<last_odom_stamp_) {
+        odom_status_=Result::STALE_INPUT; last_odom_stamp_=stamp; blind_poses_.clear();
+        if (blind_radius_>0) invalidateCloud(Result::STALE_INPUT,"odometry time moved backwards; map reset");
+      }
       return;
     }
     have_odom_stamp_=true; last_odom_stamp_=stamp;
@@ -135,6 +176,10 @@ class Planner : public rclcpp::Node {
     rotation.normalize(); if (body_twist_) velocity_=rotation*velocity_;
     odom_received_=Clock::now(); odom_stamp_=m.header.stamp;
     odom_status_=fresh(odom_received_,odom_stamp_)?0:Result::STALE_INPUT;
+    if (blind_radius_>0 && !odom_status_) {
+      blind_poses_.push_back({stamp,position_+rotation*blind_offset_});
+      if (blind_poses_.size()>kBlindPoseHistorySize) blind_poses_.pop_front();
+    }
   }
   // Goals persist until replaced; only position/frame are consumed, not orientation or timestamp.
   // Every received goal advances the revision, including repeated coordinates and invalid requests.
@@ -205,6 +250,11 @@ class Planner : public rclcpp::Node {
   std::unique_ptr<KinodynamicAstar> core_;
   std::string frame_,stamp_clock_,cloud_detail_="no cloud received";
   double rate_,timeout_,step_; bool body_twist_;
+  // Startup-only filter: old accumulated observations are never recropped as the vehicle moves.
+  struct BlindPose { int64_t stamp; Vector origin; };
+  std::deque<BlindPose> blind_poses_;
+  double blind_radius_,blind_pose_tolerance_;
+  Vector blind_offset_=Vector::Zero();
   Vector position_=Vector::Zero(),velocity_=Vector::Zero(),goal_=Vector::Zero();
   Clock::time_point cloud_received_,odom_received_;
   builtin_interfaces::msg::Time cloud_stamp_,odom_stamp_;
@@ -216,6 +266,7 @@ class Planner : public rclcpp::Node {
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
   rclcpp::Publisher<Result>::SharedPtr result_pub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr filtered_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 int main(int argc,char** argv) {

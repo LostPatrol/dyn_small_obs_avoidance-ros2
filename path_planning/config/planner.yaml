@@ -13,6 +13,14 @@ path_planning:
     # receive mode preserves device timestamps but cannot measure upstream acquisition/transport delay.
     stamp_clock: ros  # ros: validate header age; receive: explicitly accept unknown sensor-clock offset
     odometry_twist_in_body: true  # nav_msgs/Odometry twist is expressed in child_frame_id
+    # Metres, >=0: remove points strictly inside this 3D radius before map accumulation; 0 disables.
+    # This is a sensor blind zone, not body classification: real obstacles inside it are also removed.
+    cloud.blind_radius: 0.0
+    # Sensor centre relative to the odometry pose origin, expressed in child-frame axes (metres).
+    cloud.blind_origin_offset: [0.0, 0.0, 0.0]
+    # Seconds, >0: nearest valid odometry/cloud source timestamp difference allowed for filtering.
+    # No interpolation; enabled filtering requires a shared source clock even in receive mode.
+    cloud.blind_pose_tolerance: 0.05
     # Seconds, >0: maximum output sample interval. Exact segment endpoints are always included.
     # Smaller values increase serialization/DDS cost; this does not set collision-check resolution.
     sample_step: 0.02
