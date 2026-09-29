@@ -42,14 +42,18 @@ def test_planner_process(tmp_path, blind_radius):
         node.create_subscription(Path, 'kino_path', paths.append, 10)
 
         def feed(points=((-20.0, -20.0, 1.0),), frame='map', velocity=(0.0, 0.0, 0.0), yaw=0.0,
-                 cloud_stamp=None, malformed=False, position=(0.0, 0.0, 1.0)):
+                 cloud_stamp=None, malformed=False, position=(0.0, 0.0, 1.0), delayed_pair=False):
             stamp = node.get_clock().now().to_msg()
+            if delayed_pair:
+                stamp = (node.get_clock().now()+rclpy.duration.Duration(seconds=.2)).to_msg()
             cloud = create_cloud_xyz32(Header(stamp=stamp, frame_id=frame), points)
             if cloud_stamp is not None:
                 cloud.header.stamp = cloud_stamp
             if malformed:
                 cloud.fields = cloud.fields[:2]  # Missing z must fail before PCL conversion.
             clouds.publish(cloud)
+            if delayed_pair:
+                time.sleep(.06)  # Cloud arrives before its matching odometry, within the wait budget.
             odom = Odometry()
             odom.header = Header(stamp=stamp, frame_id='map')
             odom.child_frame_id = 'body'
@@ -113,10 +117,17 @@ def test_planner_process(tmp_path, blind_radius):
                     future = (node.get_clock().now()+rclpy.duration.Duration(seconds=.3)).to_msg()
                     feed(cloud_stamp=future)
                 mismatch = wait_for(lambda r: r.status == r.STALE_INPUT and
-                                    'time-matched' in r.detail, skewed)
+                                    'waiting for matched' in r.detail, skewed)
                 assert mismatch.map_points == 0
                 # Allow source time to catch up to the deliberately future-stamped frame.
                 time.sleep(.35)
+                wait_for(lambda r: r.status == r.REACH_END, feed)
+                feed(delayed_pair=True)
+                delayed = wait_for(lambda r: r.status == r.REACH_END and
+                                   r.cloud_stamp.sec*10**9+r.cloud_stamp.nanosec >
+                                   node.get_clock().now().nanoseconds)
+                assert delayed.segments
+                time.sleep(.25)
                 wait_for(lambda r: r.status == r.REACH_END, feed)
             # Odometry twist is in the child frame: +x body at yaw=90deg becomes +y world.
             moving = wait_for(lambda r: r.status == r.REACH_END and abs(r.segments[0].y[1]-0.3)<1e-6,
@@ -156,7 +167,9 @@ def test_planner_process(tmp_path, blind_radius):
             assert not changed.segments
             for _ in range(10):
                 rclpy.spin_once(node, timeout_sec=0.01)
-            assert paths and not paths[-1].poses
+            # Failures carry empty trajectories in PlanResult, but never erase the RViz preview.
+            assert paths and all(p.poses for p in paths)
+            assert paths[-1].header.stamp != changed.header.stamp
         finally:
             node.destroy_node()
             rclpy.shutdown()

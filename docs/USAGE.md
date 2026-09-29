@@ -109,10 +109,12 @@ ros2 topic echo /plan_result
 | `odom` | `nav_msgs/msg/Odometry` | pose 在规划 frame；默认 twist 在 child_frame_id，由姿态旋转到世界系 |
 | `goal` | `geometry_msgs/msg/PoseStamped` | 位置目标，目标速度为零；姿态/yaw 不参与求解；目标持续有效直到被新目标替换 |
 | `plan_result` | `path_planning/msg/PlanResult` | 同一消息中的状态、输入时标、序号、目标版本、精确多项式和 p/v/a 采样 |
-| `kino_path` | `nav_msgs/msg/Path` | 同一轨迹的位置预览；失败发布空路径；不用于跨话题拼接控制结果 |
+| `kino_path` | `nav_msgs/msg/Path` | 仅成功时发布的位置预览；失败不发送空路径，RViz保留最后成功预览；不是当前有效性依据 |
 
 点云和里程计 QoS：BEST_EFFORT/VOLATILE/depth 1，可接可靠或非可靠传感器发布者。
-目标与输出：RELIABLE/VOLATILE/depth 1，不保留旧规划供晚加入的消费者误用。
+目标与结果/路径输出：RELIABLE/VOLATILE/depth 1，晚加入的消费者须等待新消息。
+RViz已显示的路径会在失败时保留，直至下一次成功或用户清除显示；其时间戳不更新。
+判断当前规划是否有效必须读取 `/plan_result`，不能依据预览是否还在。
 参数在启动时读取；修改配置后重启节点。
 
 配置模板逐项标注了单位、约束与主要影响。`search.*` 默认值也在
@@ -226,8 +228,10 @@ ros2 launch path_planning odin.launch.py blind_radius:=0.5
 节点会按匹配姿态旋转该偏移。零偏移不意味着已标定 Odin IMU/雷达外参。
 
 每帧点云匹配最多256条有效历史里程计中时间戳最近的一条，最大时间差由
-`cloud.blind_pose_tolerance` 控制，默认0.05秒，不插值、不等待未来里程计。
-两路必须使用相同源时钟，即使选择 `stamp_clock=receive` 也是如此；不匹配时清空地图并报告状态。
+`cloud.blind_pose_tolerance` 控制，默认0.05秒，不插值。没有匹配时缓存一帧点云，
+等待后来到达的里程计，最长 `cloud.blind_wait=0.15` 秒（不能大于input_timeout）。
+新点云不会延长旧等待期限，已有地图仍遵守原新鲜度限制；超时清图并报告STALE_INPUT。
+两路必须使用相同源时钟，即使选择 `stamp_clock=receive` 也是如此。
 过滤发生在累计/体素化之前，只剔除严格小于半径的点，不随飞机移动重新挖除旧地图。
 全部点被滤掉时报告 `NO_MAP`，不会视为整片自由空间。
 

@@ -21,6 +21,8 @@ path_planning:
     # Seconds, >0: nearest valid odometry/cloud source timestamp difference allowed for filtering.
     # No interpolation; enabled filtering requires a shared source clock even in receive mode.
     cloud.blind_pose_tolerance: 0.05
+    # Seconds, >0 and <=input_timeout: bounded asynchronous wait for late odometry (one cloud).
+    cloud.blind_wait: 0.15
     # Seconds, >0: maximum output sample interval. Exact segment endpoints are always included.
     # Smaller values increase serialization/DDS cost; this does not set collision-check resolution.
     sample_step: 0.02

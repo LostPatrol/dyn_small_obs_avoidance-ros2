@@ -53,10 +53,12 @@ class Planner : public rclcpp::Node {
     body_twist_=declare_parameter("odometry_twist_in_body",true);
     blind_radius_=declare_parameter("cloud.blind_radius",0.0);
     blind_pose_tolerance_=declare_parameter("cloud.blind_pose_tolerance",0.05);
+    blind_wait_=declare_parameter("cloud.blind_wait",0.15);
     const auto offset=declare_parameter("cloud.blind_origin_offset",std::vector<double>{0,0,0});
     if (offset.size()!=3) throw std::invalid_argument("blind_origin_offset requires three coordinates");
     blind_offset_=Eigen::Map<const Vector>(offset.data());
     if (!std::isfinite(blind_radius_) || blind_radius_<0 || !positive(blind_pose_tolerance_) ||
+        !positive(blind_wait_) || blind_wait_>timeout_ ||
         !blind_offset_.allFinite()) throw std::invalid_argument("invalid blind filter parameters");
     if (frame_.empty() || !positive(rate_) || rate_>kMaxPlanningRateHz || !positive(timeout_) || !positive(step_) ||
         (stamp_clock_!="ros" && stamp_clock_!="receive")) throw std::invalid_argument("invalid wrapper parameters");
@@ -94,6 +96,7 @@ class Planner : public rclcpp::Node {
   }
   // Drop geometry as well as readiness: recovery starts a new accumulation window.
   void invalidateCloud(uint8_t status, const std::string& detail) {
+    pending_cloud_.reset();
     core_->clearMap(); cloud_status_=status; cloud_detail_=detail;
   }
   // Check PointCloud2 layout before PCL conversion, including padding and scalar XYZ fields.
@@ -121,19 +124,34 @@ class Planner : public rclcpp::Node {
     if (cloud_status_==0 && !fresh(cloud_received_,cloud_stamp_)) core_->clearMap();
     pcl::PointCloud<pcl::PointXYZ> points;
     pcl::fromROSMsg(m,points);
+    processPendingCloud();
+    // Keep the older pending observation until matched or expired; new arrivals must not
+    // extend its deadline. At most one cloud is buffered, without blocking the executor.
+    if (pending_cloud_) return;
+    pending_cloud_=std::make_unique<PendingCloud>(PendingCloud{std::move(points),m.header,received});
+    processPendingCloud();
+  }
+  void processPendingCloud() {
+    if (!pending_cloud_) return;
+    auto& pending=*pending_cloud_;
+    if (!fresh(pending.received,pending.header.stamp)) {
+      invalidateCloud(Result::STALE_INPUT,"pending cloud expired"); return;
+    }
+    auto& points=pending.points;
+    const int64_t stamp=rclcpp::Time(pending.header.stamp).nanoseconds();
     if (blind_radius_>0) {
       // Registered points are already in the world frame. Match acquisition timestamps, not
       // callback arrival times; both streams must share a source clock even in receive mode.
       // A sphere needs only the sensor centre, including the rotated odometry-to-sensor offset.
-      if (odom_status_ || !fresh(odom_received_,odom_stamp_) || blind_poses_.empty()) {
-        invalidateCloud(Result::WAITING_FOR_INPUT,"blind filter needs fresh odometry"); return;
-      }
       const auto pose=std::min_element(blind_poses_.begin(),blind_poses_.end(),
           [stamp](const BlindPose& a,const BlindPose& b) {
             return std::abs(a.stamp-stamp)<std::abs(b.stamp-stamp);
           });
-      if (std::abs(pose->stamp-stamp)*1e-9>blind_pose_tolerance_) {
-        invalidateCloud(Result::STALE_INPUT,"blind filter has no time-matched odometry"); return;
+      if (odom_status_ || !fresh(odom_received_,odom_stamp_) || pose==blind_poses_.end() ||
+          std::abs(pose->stamp-stamp)*1e-9>blind_pose_tolerance_) {
+        if (std::chrono::duration<double>(Clock::now()-pending.received).count()>=blind_wait_)
+          invalidateCloud(Result::STALE_INPUT,"blind filter timed out waiting for matched odometry");
+        return;
       }
       // Nonfinite points must still be rejected by the core, never hidden by filtering.
       points.erase(std::remove_if(points.begin(),points.end(),[&](const pcl::PointXYZ& p) {
@@ -142,14 +160,15 @@ class Planner : public rclcpp::Node {
       }),points.end());
       if (points.empty()) {
         sensor_msgs::msg::PointCloud2 filtered; pcl::toROSMsg(points,filtered);
-        filtered.header=m.header; filtered_pub_->publish(filtered);
+        filtered.header=pending.header; filtered_pub_->publish(filtered);
         invalidateCloud(Result::NO_MAP,"all cloud points removed by blind filter"); return;
       }
     }
     if (!core_->setKdtree(points)) { invalidateCloud(Result::INVALID_INPUT,"nonfinite cloud or map capacity exceeded"); return; }
     sensor_msgs::msg::PointCloud2 filtered; pcl::toROSMsg(points,filtered);
-    filtered.header=m.header; filtered_pub_->publish(filtered);
-    cloud_received_=received; cloud_stamp_=m.header.stamp; cloud_status_=0;
+    filtered.header=pending.header; filtered_pub_->publish(filtered);
+    cloud_received_=pending.received; cloud_stamp_=pending.header.stamp; cloud_status_=0;
+    pending_cloud_.reset();
   }
   // Pose is already in the planning frame. By Odometry convention, twist is in child_frame_id;
   // rotate its linear component using the pose orientation unless the producer explicitly uses world twist.
@@ -180,6 +199,7 @@ class Planner : public rclcpp::Node {
       blind_poses_.push_back({stamp,position_+rotation*blind_offset_});
       if (blind_poses_.size()>kBlindPoseHistorySize) blind_poses_.pop_front();
     }
+    processPendingCloud();
   }
   // Goals persist until replaced; only position/frame are consumed, not orientation or timestamp.
   // Every received goal advances the revision, including repeated coordinates and invalid requests.
@@ -189,8 +209,9 @@ class Planner : public rclcpp::Node {
     goal_=vec(m.pose.position);
     goal_status_=goal_.allFinite()?0:Result::INVALID_INPUT;
   }
-  // Every attempt emits an atomic status; failure also emits an empty visualization path.
+  // Every attempt emits an atomic status. Path is a last-success visualization, not validity state.
   void plan() {
+    processPendingCloud();
     // Readiness flags are internal: zero means valid input, not a published PlanResult status.
     // The first failing gate determines the reported reason; this is not an aggregate diagnostic.
     Result result; result.header.stamp=now(); result.header.frame_id=frame_;
@@ -245,7 +266,8 @@ class Planner : public rclcpp::Node {
       }
     }
     result.map_points=core_->mapPointCount();
-    result_pub_->publish(result); path_pub_->publish(path);
+    result_pub_->publish(result);
+    if (!path.poses.empty()) path_pub_->publish(path);
   }
   std::unique_ptr<KinodynamicAstar> core_;
   std::string frame_,stamp_clock_,cloud_detail_="no cloud received";
@@ -253,7 +275,13 @@ class Planner : public rclcpp::Node {
   // Startup-only filter: old accumulated observations are never recropped as the vehicle moves.
   struct BlindPose { int64_t stamp; Vector origin; };
   std::deque<BlindPose> blind_poses_;
-  double blind_radius_,blind_pose_tolerance_;
+  double blind_radius_,blind_pose_tolerance_,blind_wait_;
+  struct PendingCloud {
+    pcl::PointCloud<pcl::PointXYZ> points;
+    std_msgs::msg::Header header;
+    Clock::time_point received;
+  };
+  std::unique_ptr<PendingCloud> pending_cloud_;
   Vector blind_offset_=Vector::Zero();
   Vector position_=Vector::Zero(),velocity_=Vector::Zero(),goal_=Vector::Zero();
   Clock::time_point cloud_received_,odom_received_;
