@@ -8,13 +8,16 @@
 及 `collision_step/2` 两项附加半径，有效阈值从0.648205 m变为0.45 m。
 共同搜索参数与上游demo.launch相同；ROS2专属预算/新鲜度/输出限制和0.05 m碰撞采样间距保留。
 19项核心回归包括0.44/0.46 m阈值两侧与可精确表示的0.5 m等号边界。
-本次amd64 Release构建通过；18/19核心用例、全部6项helper、5项ROS进程和3项benchmark用例通过。
+本次amd64与new ARM64原生Release构建通过；两平台均18/19核心用例、全部6项helper、
+5项ROS进程和3项benchmark用例通过。
 保留原严格 `CollisionBetweenPrimitiveEndpoints` 测试，没有放宽断言：其自定义参数
 `safe_distance=0.1`、`voxel_size=0.01`、`collision_step=0.025` 时，连续密采样最小距离
 0.0999903617 m，小于0.1 m，因此失败。这个用例原依赖采样补偿，恢复ROS1离散判定后
 不再保证连续净空；不能把已知失败记为通过。colcon计为37项、2 failures（1逻辑用例及其包装项）。
 首次ROS盲区用例还沿用0.55 m点占用的旧预期；调整为距起点0.4 m、距盲区球心0.6 m的点后，
 继续验证“保留的障碍会阻塞起点”，5项ROS进程测试全部通过。初始失败日志保留。
+new隔离domain 229安装节点读回safe_distance=0.45、voxel_size=0.1、collision_step=0.05、
+search_budget=0.3、odom/receive；代码阈值回归通过，安装核心库已更新。本次未发布现场目标。
 下面绑定 `afc868b` 的测试与现场数据仍是改动前证据，不能视为0.45 m新策略的性能或现场验收。
 
 ## task37修复版本记录（2026-10-08，距离参数对齐之前）
