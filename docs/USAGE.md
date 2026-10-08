@@ -165,10 +165,13 @@ Odometry 没有加速度字段，所以从上游的自由加速度原语分支�
   `NO_PATH=3`、`INVALID_INPUT=5`、`NO_MAP=6`、`TIMEOUT=7`、`NODE_LIMIT=8`、
   `WAITING_FOR_INPUT=9`、`STALE_INPUT=10`、`FRAME_MISMATCH=11` 分别表示对应失败。
   保留枚举 `NEAR_END=4` 兼容源代码术语，目前终端连接失败继续搜索，不输出该状态。
-- `output.max_samples`（默认 10000）、`output.max_duration`（默认 60 s）和
-  `output.build_budget`（默认 0.1 s）在启动时读取，分别限制输出采样数、曲线总时长与输出构造墙钟预算。
-  输出构造超过限制时发布失败的 PlanResult 和空轨迹，不更新最后成功 Path。
-  墙钟预算采用合作式检查，不是硬实时截止，也不包含完整 DDS/消费者开销。
+- `output.max_samples`（默认 10000，范围 `[1,1000000]`）、`output.max_duration`
+  （默认 60 s，范围 `(0,3600] s`）和 `output.build_budget`（默认 0.1 s，有限正数）
+  在启动时读取，分别限制输出采样数、曲线总时长与输出构造墙钟预算。
+  超采样数或总时长返回 `INVALID_INPUT`，不截短曲线；构造超预算返回 `TIMEOUT`；
+  发布前输入过期返回 `STALE_INPUT`。这些失败均为空轨迹，不更新最后成功 Path。
+  墙钟预算采用合作式检查，单次分配/采样调用可能越过 deadline；不是硬实时截止，
+  也不包含完整 DDS/消费者开销。
 - 多项式每轴为 `c0+c1*t+c2*t²+c3*t³`，`t∈[0,duration]`；按段顺序累计时间。
   p/v 连续，段间加速度允许跳变。采样包含精确首尾点与所有段边界，间隔不超过 `sample_step`。
   中间边界的 acceleration 采样取前段末值；精确段接口可按右连续约定求值。
