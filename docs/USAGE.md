@@ -51,8 +51,25 @@ source install/setup.bash
 .venv/bin/python path_planning/test/benchmark.py --seconds 30 --output /tmp/planner-benchmark.json
 ```
 
-这是规划计算与 DDS 测试，不是仿真飞机执行路径；最终输出包含状态计数、搜索时间分位数、
-结果间隔、内存和 CPU。测试结果与未通过指标见 [验证记录](VALIDATION.md)。
+这是规划计算与 DDS 测试，不是仿真飞机执行路径。benchmark 与正式 launch 都默认加载安装目录的
+`planner.yaml`；传入 `--config /absolute/path/planner.yaml` 选择同一配置副本。
+脚本仅自动适配输入 frame（合成为 map，bag 为源点云 frame）和 stamp_clock（合成为 ros，bag 为 receive）。
+搜索预算、碰撞设置和规划边界继承配置，改变几何范围须显式传入 `--lower x y z`。
+
+分别实测历史 80 ms 和当前 300 ms 预算：
+
+```bash
+.venv/bin/python path_planning/test/benchmark.py --search-budget 0.08 --seconds 30 --output /tmp/planner-80ms.json
+.venv/bin/python path_planning/test/benchmark.py --search-budget 0.3 --seconds 30 --output /tmp/planner-300ms.json
+```
+
+JSON 和同目录 `.log` 绑定实际节点的完整解析参数、源码 SHA/dirty、配置/二进制哈希、构建/依赖版本、
+硬件/内核信息。保留每条收到的结果的标量记录和全部失败（包含 warmup；仅分位数排除输入开始的第一秒），
+避免保留庞大轨迹对象干扰 GC；结果序号缺口单独报告。
+指标包括搜索时间、结果接收间隔、输入 publish 年龄和结果年龄的 P50/P95/P99/max，
+观测到的连续失败时长、CPU/RSS 与地图规模。publish 年龄不等于节点接收年龄；
+设备时钟模式的源年龄记为未知。接收间隔与这些年龄均不是传感器到飞控执行的端到端时延。
+脚本不提供 `/clock`，要求 `use_sim_time=false`。测试结果与未通过指标见 [验证记录](VALIDATION.md)。
 
 ## RViz2 可视化
 
@@ -121,6 +138,7 @@ RViz已显示的路径会在失败时保留，直至下一次成功或用户清�
 [`SearchConfig`](../path_searching/include/path_searching/kinodynamic_astar.h) 中提供，
 便于直接调用C++库；维护默认值时应同时核对YAML与头文件。
 ROS配置模板的搜索预算现为0.3秒；直接调用核心库的默认预算仍为0.08秒。
+benchmark默认也读取该安装模板，不再隐式使用核心0.08秒默认值。
 初始固定加速度时长和时间索引分辨率只对核心库的相应搜索模式生效，模板已标明；
 它们不会让当前ROS节点自动启用动态障碍预测。
 
@@ -147,6 +165,10 @@ Odometry 没有加速度字段，所以从上游的自由加速度原语分支�
   `NO_PATH=3`、`INVALID_INPUT=5`、`NO_MAP=6`、`TIMEOUT=7`、`NODE_LIMIT=8`、
   `WAITING_FOR_INPUT=9`、`STALE_INPUT=10`、`FRAME_MISMATCH=11` 分别表示对应失败。
   保留枚举 `NEAR_END=4` 兼容源代码术语，目前终端连接失败继续搜索，不输出该状态。
+- `output.max_samples`（默认 10000）、`output.max_duration`（默认 60 s）和
+  `output.build_budget`（默认 0.1 s）在启动时读取，分别限制输出采样数、曲线总时长与输出构造墙钟预算。
+  输出构造超过限制时发布失败的 PlanResult 和空轨迹，不更新最后成功 Path。
+  墙钟预算采用合作式检查，不是硬实时截止，也不包含完整 DDS/消费者开销。
 - 多项式每轴为 `c0+c1*t+c2*t²+c3*t³`，`t∈[0,duration]`；按段顺序累计时间。
   p/v 连续，段间加速度允许跳变。采样包含精确首尾点与所有段边界，间隔不超过 `sample_step`。
   中间边界的 acceleration 采样取前段末值；精确段接口可按右连续约定求值。
@@ -183,11 +205,12 @@ Odometry 没有加速度字段，所以从上游的自由加速度原语分支�
 ```bash
 .venv/bin/python path_planning/test/benchmark.py \
   --bag /absolute/path/ros2_bag --cloud-topic /cloud_registered --odom-topic /Odometry \
-  --goal-offset 1 0 0 --seconds 30 --output /tmp/replay.json
+  --goal-offset 1 0 0 --lower -50 -50 -10 --seconds 30 --output /tmp/replay.json
 ```
 
 目标仅用于离线验证，是第一条里程计位置加指定偏移；没有发布到真实传感器或飞控话题。
-基准使用 z 下界 -10 m，以容纳原点在机体处的地面数据；不平移点云，不伪造离地状态。
+上述命令显式使用 z 下界 -10 m，以容纳原点在机体处的地面数据；不平移点云，不伪造离地状态。
+未传入 `--lower` 时保持所加载 YAML 的边界，不会为了 bag 成功而自动更改。
 若输入包只有原始 LiDAR 而没有已配准点云/里程计，需先由外部 SLAM 生成，不能直接喂给搜索器。
 上游公开 ROS1 bag 链接在 2026-09-23 检查时返回 HTTP 404；本仓库未携带或声称验证该数据集。
 

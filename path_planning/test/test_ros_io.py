@@ -1,7 +1,8 @@
-"""Real DDS/process regression: planning, velocity frames, failure invalidation and freshness."""
+"""Real DDS regressions for strict XYZ layouts, bounded outputs, frames and freshness."""
 import math
 import os
 import signal
+import struct
 import subprocess
 import time
 import pytest
@@ -16,9 +17,53 @@ from ament_index_python.packages import get_package_prefix
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry, Path
 from path_planning.msg import PlanResult
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud2, PointField
 from sensor_msgs_py.point_cloud2 import create_cloud_xyz32
 from std_msgs.msg import Header
+
+
+def alter_cloud(cloud, variant):
+    """Build wire-level adversarial schemas or a legal extended, padded organized cloud."""
+    if variant == 'duplicate_bad_first':
+        cloud.fields.insert(0, PointField(name='x', offset=1024, datatype=PointField.FLOAT32, count=1))
+    elif variant == 'duplicate_bad_last':
+        cloud.fields.append(PointField(name='x', offset=1024, datatype=PointField.FLOAT32, count=1))
+    elif variant == 'duplicate_valid':
+        cloud.fields.append(PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1))
+    elif variant == 'offset_outside':
+        cloud.fields[0].offset = 1024
+    elif variant == 'offset_crosses_point':
+        cloud.fields[2].offset = 10
+    elif variant == 'overlap':
+        cloud.fields[1].offset = 2
+    elif variant == 'wrong_type':
+        cloud.fields[0].datatype = PointField.FLOAT64
+    elif variant == 'count_zero':
+        cloud.fields[0].count = 0
+    elif variant == 'count_two':
+        cloud.fields[0].count = 2
+    elif variant == 'empty_data':
+        cloud.data = b''
+    elif variant == 'short_row':
+        cloud.row_step = 8
+    elif variant == 'extended_padding':
+        # z/intensity/y/x deliberately differ from packed XYZ order. Each point has 4 padding
+        # bytes and each organized row 8; data uses the declared offsets, not struct order.
+        cloud.fields = [PointField(name=name, offset=offset, datatype=PointField.FLOAT32, count=1)
+                        for name, offset in [('z', 12), ('intensity', 0), ('y', 8), ('x', 4)]]
+        cloud.width, cloud.height, cloud.point_step, cloud.row_step = 2, 2, 20, 48
+        point = struct.pack('<ffff', 99., -20., -20., 1.) + b'\x00'*4
+        cloud.data = (point*2 + b'\x00'*8)*2
+    elif variant is not None:
+        raise ValueError(variant)
+    return cloud
+
+
+def assert_clean_exit(proc, log_path):
+    """Also catch recoverable UBSan diagnostics and sanitizer failures emitted on shutdown."""
+    assert proc.returncode in (0, -signal.SIGINT), log_path.read_text()
+    log = log_path.read_text()
+    assert 'AddressSanitizer' not in log and 'runtime error:' not in log, log
 
 
 @pytest.mark.parametrize('blind_radius', [0.0, 0.5])
@@ -42,7 +87,8 @@ def test_planner_process(tmp_path, blind_radius):
         node.create_subscription(Path, 'kino_path', paths.append, 10)
 
         def feed(points=((-20.0, -20.0, 1.0),), frame='map', velocity=(0.0, 0.0, 0.0), yaw=0.0,
-                 cloud_stamp=None, malformed=False, position=(0.0, 0.0, 1.0), delayed_pair=False):
+                 cloud_stamp=None, malformed=False, position=(0.0, 0.0, 1.0), delayed_pair=False,
+                 variant=None):
             stamp = node.get_clock().now().to_msg()
             if delayed_pair:
                 stamp = (node.get_clock().now()+rclpy.duration.Duration(seconds=.2)).to_msg()
@@ -51,6 +97,7 @@ def test_planner_process(tmp_path, blind_radius):
                 cloud.header.stamp = cloud_stamp
             if malformed:
                 cloud.fields = cloud.fields[:2]  # Missing z must fail before PCL conversion.
+            alter_cloud(cloud, variant)
             clouds.publish(cloud)
             if delayed_pair:
                 time.sleep(.06)  # Cloud arrives before its matching odometry, within the wait budget.
@@ -149,6 +196,36 @@ def test_planner_process(tmp_path, blind_radius):
             malformed = wait_for(lambda r: r.status == r.INVALID_INPUT, lambda: feed(malformed=True))
             assert not malformed.segments
             wait_for(lambda r: r.status == r.REACH_END, feed)
+            if not blind_radius:
+                # Real DDS sends both duplicate orders through the installed PCL-linked wrapper;
+                # every invalid schema resets the map and emits no current executable trajectory.
+                recovered = wait_for(lambda r: r.status == r.REACH_END, feed)
+                for variant in ('duplicate_bad_first', 'duplicate_bad_last', 'duplicate_valid',
+                                'offset_outside', 'offset_crosses_point', 'overlap', 'wrong_type',
+                                'count_zero', 'count_two', 'empty_data', 'short_row'):
+                    invalid = wait_for(lambda r: r.status == r.INVALID_INPUT and
+                                       r.sequence > recovered.sequence,
+                                       lambda variant=variant: feed(variant=variant))
+                    assert not invalid.segments and not invalid.trajectory.points, variant
+                    assert invalid.map_points == 0, variant
+                    assert all(p.header.stamp != invalid.header.stamp for p in paths), variant
+                    recovered = wait_for(lambda r: r.status == r.REACH_END and
+                                         r.sequence > invalid.sequence, feed)
+                for nonfinite in (float('nan'), float('inf'), -float('inf')):
+                    invalid = wait_for(lambda r: r.status == r.INVALID_INPUT and
+                                       r.sequence > recovered.sequence,
+                                       lambda: feed(points=((nonfinite, -20., 1.),)))
+                    assert not invalid.segments and not invalid.trajectory.points
+                    assert invalid.map_points == 0
+                    recovered = wait_for(lambda r: r.status == r.REACH_END and
+                                         r.sequence > invalid.sequence, feed)
+                earliest_extended_stamp = node.get_clock().now().nanoseconds
+                extended = wait_for(lambda r: r.status == r.REACH_END and
+                                    r.sequence > recovered.sequence and
+                                    r.cloud_stamp.sec*10**9+r.cloud_stamp.nanosec >= earliest_extended_stamp,
+                                    lambda: feed(variant='extended_padding'))
+                assert extended.segments and extended.trajectory.points
+                assert abs(extended.trajectory.points[-1].transforms[0].translation.x-4.) < 1e-8
             # A repeated observation cannot extend map freshness while odometry stays fresh.
             frozen = node.get_clock().now().to_msg()
             duplicate = wait_for(lambda r: r.status == r.STALE_INPUT,
@@ -179,3 +256,64 @@ def test_planner_process(tmp_path, blind_radius):
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=5)
+            assert_clean_exit(proc, tmp_path / 'node.log')
+
+
+@pytest.mark.parametrize('limit,expected_status,detail', [
+    ('output.max_samples:=2', PlanResult.INVALID_INPUT, 'samples'),
+    ('output.max_duration:=0.01', PlanResult.INVALID_INPUT, 'duration'),
+    ('output.build_budget:=0.000000000001', PlanResult.TIMEOUT, 'construction budget'),
+])
+def test_output_limits_process(tmp_path, limit, expected_status, detail):
+    """A normal solvable search must fail empty when configured output limits cannot fit it."""
+    exe = get_package_prefix('path_planning') + '/lib/path_planning/path_planning_node'
+    log_path = tmp_path / 'node.log'
+    with log_path.open('w') as log:
+        proc = subprocess.Popen([exe, '--ros-args', '-p', 'planning_frame:=map',
+                                 '-p', 'input_timeout:=2.0', '-p', limit], stdout=log, stderr=log)
+        rclpy.init()
+        node = rclpy.create_node('planner_output_limits_test')
+        clouds = node.create_publisher(PointCloud2, 'cloud', qos_profile_sensor_data)
+        odoms = node.create_publisher(Odometry, 'odom', qos_profile_sensor_data)
+        goals = node.create_publisher(PoseStamped, 'goal', 1)
+        results, paths = [], []
+        node.create_subscription(PlanResult, 'plan_result', results.append, 10)
+        node.create_subscription(Path, 'kino_path', paths.append, 10)
+        try:
+            deadline = time.monotonic()+8
+            while time.monotonic() < deadline:
+                assert proc.poll() is None, log_path.read_text()
+                stamp = node.get_clock().now().to_msg()
+                clouds.publish(create_cloud_xyz32(Header(stamp=stamp, frame_id='map'),
+                                                  ((-20., -20., 1.),)))
+                odom = Odometry()
+                odom.header = Header(stamp=stamp, frame_id='map')
+                odom.child_frame_id = 'body'
+                odom.pose.pose.position.z = 1.
+                odom.pose.pose.orientation.w = 1.
+                odoms.publish(odom)
+                goal = PoseStamped()
+                goal.header.frame_id = 'map'
+                goal.pose.position.x, goal.pose.position.z = 4., 1.
+                goal.pose.orientation.w = 1.
+                goals.publish(goal)
+                rclpy.spin_once(node, timeout_sec=.03)
+                if results and results[-1].status == expected_status and detail in results[-1].detail:
+                    break
+                time.sleep(.02)
+            else:
+                raise AssertionError([(r.status, r.detail) for r in results[-10:]])
+            assert not results[-1].segments and not results[-1].trajectory.points
+            for _ in range(10):
+                rclpy.spin_once(node, timeout_sec=.01)
+            assert not paths  # Failure must never publish an empty or partially constructed RViz Path.
+        finally:
+            node.destroy_node()
+            rclpy.shutdown()
+            proc.send_signal(signal.SIGINT)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+            assert_clean_exit(proc, log_path)

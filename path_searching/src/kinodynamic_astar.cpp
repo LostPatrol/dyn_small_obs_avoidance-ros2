@@ -3,6 +3,7 @@
 #include <pcl/filters/voxel_grid.h>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 using namespace std;
 using namespace Eigen;
@@ -13,13 +14,8 @@ namespace {
 constexpr double kMaxGridCellsPerAxis = 1e8;  // Limit the configured spatial-index range.
 constexpr double kMaxSearchBudgetSeconds = 60.0;  // Reject accidentally unbounded search budgets.
 constexpr double kMaxPrimitiveCollisionChecks = 1e6;  // Cap configured work per primitive.
-constexpr std::size_t kMaxTrajectorySamples = 1000000;  // Bound output allocation per sampling call.
 constexpr double kNearGoalDistanceMeters = 1.0;  // Per-axis voxel tolerance for attempting a shot.
-constexpr double kAccelerationStepFraction = 1.0 / 2.0;  // Five samples per axis, including zero.
-constexpr double kDurationStepFraction = 1.0;  // Regular primitives use the full max_tau.
-constexpr double kInitialDurationStepFraction = 1.0 / 20.0;  // Twenty fixed-acceleration durations.
-constexpr double kAccelerationLoopSlack = 1e-3;  // m/s²; preserve upstream inclusive loop endpoints.
-constexpr double kDurationLoopSlackSeconds = 1e-3;  // Same endpoint slack, but for initial durations.
+constexpr int kInitialDurationCount = 20;  // Fixed count, independent of parameter magnitude.
 constexpr double kMinHeuristicTimeSeconds = 1e-3;  // Avoid singular cost at coincident endpoints.
 constexpr double kHeuristicVelocityFraction = 0.5;  // Upstream heuristic time lower-bound scale.
 constexpr double kInitialHeuristicCost = 100000000.0;  // Upstream finite sentinel; retain its behavior.
@@ -33,6 +29,16 @@ void SearchConfig::validate() const {
   for (double v : {max_tau, init_max_tau, max_vel, max_acc, w_time, horizon, lambda_heu,
                    resolution, time_resolution, safe_distance, voxel_size, collision_step, search_budget})
     if (!std::isfinite(v) || v <= 0) throw std::invalid_argument("search parameters must be finite and positive");
+  // Check operations needed by the fixed lattice and double-integrator before search allocation.
+  // These are representability bounds, not arbitrary minimum accelerations or durations.
+  const double min_tau = init_max_tau * (1.0 / kInitialDurationCount);
+  if (max_acc / 2 == 0 || min_tau == 0 || min_tau * min_tau == 0 || max_tau * max_tau == 0 ||
+      !std::isfinite(max_tau * max_tau) || !std::isfinite(init_max_tau * init_max_tau) ||
+      !std::isfinite(3 * max_acc * max_acc) || !std::isfinite(1 / resolution) ||
+      !std::isfinite(1 / time_resolution) ||
+      !std::isfinite(max_acc * std::max(max_tau * max_tau, init_max_tau * init_max_tau)) ||
+      !std::isfinite(max_vel * std::max(max_tau, init_max_tau)))
+    throw std::invalid_argument("search parameters exceed representable acceleration, duration or index range");
   if (allocate_num < 2 || tree_period < 1 || max_cloud_points < 1 || !lower.allFinite() || !upper.allFinite() ||
       (lower.array() >= upper.array()).any() || ((upper-lower).array()/resolution > kMaxGridCellsPerAxis).any() ||
       collision_step > safe_distance || search_budget > kMaxSearchBudgetSeconds ||
@@ -217,8 +223,6 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
     cur_node->node_state = IN_CLOSE_SET;
     iter_num_ += 1;
 
-    const double res = kAccelerationStepFraction, time_res = kDurationStepFraction,
-                 time_res_init = kInitialDurationStepFraction;
     Eigen::Matrix<double, 6, 1> cur_state = cur_node->state;
     Eigen::Matrix<double, 6, 1> pro_state;
     vector<PathNodePtr> tmp_expand_nodes;
@@ -226,36 +230,45 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
     double pro_t;
     vector<Eigen::Vector3d> inputs;
     vector<double> durations;
+    inputs.reserve(init_search ? 1 : 125);
+    durations.reserve(init_search ? kInitialDurationCount : 1);
     // Initial mode preserves supplied acceleration only for this first expansion.
     // Otherwise each axis samples five accelerations in [-max_acc_, max_acc_].
     if (init_search)
     {
       inputs.push_back(start_acc_);
-      for (double tau = time_res_init * init_max_tau_; tau <= init_max_tau_ + kDurationLoopSlackSeconds;
-           tau += time_res_init * init_max_tau_)
-        durations.push_back(tau);
+      for (int i = 1; i <= kInitialDurationCount; ++i)
+        durations.push_back(init_max_tau_ * (double(i) / kInitialDurationCount));
       init_search = false;
     }
     else
     {
-      for (double ax = -max_acc_; ax <= max_acc_ + kAccelerationLoopSlack; ax += max_acc_ * res)
-        for (double ay = -max_acc_; ay <= max_acc_ + kAccelerationLoopSlack; ay += max_acc_ * res)
-          for (double az = -max_acc_; az <= max_acc_ + kAccelerationLoopSlack; az += max_acc_ * res)
+      const std::array<double, 5> accelerations{-max_acc_, -max_acc_ / 2, 0, max_acc_ / 2, max_acc_};
+      for (double ax : accelerations)
+        for (double ay : accelerations)
+          for (double az : accelerations)
           {
             um << ax, ay, az;
             inputs.push_back(um);
           }
-      for (double tau = time_res * max_tau_; tau <= max_tau_; tau += time_res * max_tau_)
-        durations.push_back(tau);
+      durations.push_back(max_tau_);
     }
     for (std::size_t i = 0; i < inputs.size(); ++i)
       for (std::size_t j = 0; j < durations.size(); ++j)
       {
         um = inputs[i];
         if (std::chrono::steady_clock::now() >= deadline_) { reset(); return TIMEOUT; }
+        if (!um.allFinite() || um.cwiseAbs().maxCoeff() > max_acc_) continue;
         double tau = durations[j];
         stateTransit(cur_state, pro_state, um, tau);
         pro_t = cur_node->time + tau;
+        if (!pro_state.allFinite()) continue;
+        // A finite absolute origin can still lose a duration or overflow the relative int hash.
+        if (dynamic && (!std::isfinite(pro_t) || pro_t <= cur_node->time ||
+            !std::isfinite((pro_t - time_origin_) * inv_time_resolution_) ||
+            (pro_t - time_origin_) * inv_time_resolution_ > std::numeric_limits<int>::max())) {
+          reset(); return INVALID_INPUT;
+        }
 
         Eigen::Vector3d pro_pos = pro_state.head(3);
         if (!inBounds(pro_pos)) continue;
@@ -497,7 +510,11 @@ bool KinodynamicAstar::computeShotTraj(Eigen::VectorXd state1, Eigen::VectorXd s
       if (t >= 0 && t <= t_d && (position(t) < config_.lower(axis) || position(t) > config_.upper(axis)))
         return false;
   }
-  const int checks = std::max(1, static_cast<int>(std::ceil(t_d * std::sqrt(3.0) * max_vel_ / config_.collision_step)));
+  const double check_count = std::ceil(t_d * std::sqrt(3.0) * max_vel_ / config_.collision_step);
+  // A heuristic shot can be much longer than a configured primitive; avoid undefined int casts.
+  if (!coef.allFinite() || !std::isfinite(check_count) || check_count >= std::numeric_limits<int>::max())
+    return false;
+  const int checks = std::max(1, static_cast<int>(check_count));
   for (int i = 0; i <= checks; ++i) {
     if (std::chrono::steady_clock::now() >= deadline_) return false;
     const double t = t_d * i / checks;
@@ -631,13 +648,30 @@ std::vector<TrajectorySegment> KinodynamicAstar::getSegments() const {
   if (is_shot_succ_) out.push_back({t_shot_, coef_shot_});
   return out;
 }
+// Retain the original exported signature for previously compiled independent consumers.
 std::vector<TrajectorySample> KinodynamicAstar::sampleTrajectory(double step) const {
+  return sampleTrajectory(step, kMaxTrajectorySamples);
+}
+// Preflight the whole result before allocating samples: callers can impose a tighter output cap.
+std::vector<TrajectorySample> KinodynamicAstar::sampleTrajectory(double step, std::size_t max_samples) const {
   if (!std::isfinite(step) || step <= 0) throw std::invalid_argument("sample step must be positive");
+  const auto segments = getSegments();
+  const auto limit = std::min(max_samples, kMaxTrajectorySamples);
+  std::size_t sample_count = 0;
+  for (const auto& s : segments) {
+    const double count = std::ceil(s.duration / step);
+    if (!std::isfinite(count) || count > limit)
+      throw std::length_error("too many trajectory samples");
+    const auto n = std::max<std::size_t>(1, static_cast<std::size_t>(count));
+    const auto added = n + (sample_count == 0 ? 1 : 0);
+    if (added > limit - sample_count) throw std::length_error("too many trajectory samples");
+    sample_count += added;
+  }
   std::vector<TrajectorySample> out;
+  out.reserve(sample_count);
   double elapsed = 0;
-  for (const auto& s : getSegments()) {
+  for (const auto& s : segments) {
     const double count = std::ceil(s.duration/step);
-    if (count > kMaxTrajectorySamples || out.size()+count+1 > kMaxTrajectorySamples) throw std::length_error("too many samples");
     // Divide each segment evenly so the endpoint is exact; omit the already-emitted shared start.
     const int n = std::max(1, static_cast<int>(count));
     for (int i = out.empty() ? 0 : 1; i <= n; ++i) {

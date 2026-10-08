@@ -2,6 +2,8 @@
 #include <gtest/gtest.h>
 #include <path_searching/kinodynamic_astar.h>
 #include <limits>
+#include <map>
+#include <set>
 using Eigen::Vector3d;
 namespace {
 SearchConfig config() { SearchConfig c; c.search_budget=2.0; return c; }
@@ -93,6 +95,135 @@ TEST(Search, HorizonIsPartialAndDynamicIndexIsDefined) {
   EXPECT_EQ(plan(k,{0,0,1},{10,0,1}),KinodynamicAstar::REACH_HORIZON);
   EXPECT_FALSE(k.getSegments().empty());
   EXPECT_EQ(k.search({0,0,1},{0,0,0},{0,0,0},{0.5,0,1},{0,0,0},false,true,12.3),KinodynamicAstar::REACH_END);
+}
+// A near-goal direct shot never exercises dynamic hashing. Force real expansions and revisit
+// a position cell at multiple times; dynamic still uses the unchanged spatial collision map.
+TEST(Search, DynamicSearchRetainsMultipleTimesInOnePositionCell) {
+  auto c=config(); c.horizon=0.2; c.time_resolution=0.04;
+  KinodynamicAstar k(c); ASSERT_TRUE(k.setKdtree(background()));
+  constexpr double origin=12.3;
+  ASSERT_EQ(k.search({0,0,1},{0,0,0},{0,0,0},{4,0,1},{0,0,0},true,true,origin),
+            KinodynamicAstar::REACH_HORIZON);
+  std::map<std::array<int,3>,std::set<int>> time_bins;
+  for (const auto node:k.getVisitedNodes()) {
+    EXPECT_EQ(node->time_idx,static_cast<int>(std::floor((node->time-origin)/c.time_resolution)));
+    time_bins[{node->index.x(),node->index.y(),node->index.z()}].insert(node->time_idx);
+  }
+  std::size_t largest=0;
+  for (const auto& cell:time_bins) largest=std::max(largest,cell.second.size());
+  EXPECT_GE(largest,3u);
+}
+// In this scene all 124 nonzero default controls land in distinct cells on the first expansion.
+// The 125th pool slot must be usable; exhaustion occurs only when another node is requested.
+TEST(Search, DefaultLatticeAndLastPoolSlotAreUsable) {
+  auto c=config(); c.horizon=0.1; c.allocate_num=125;
+  KinodynamicAstar k(c); ASSERT_TRUE(k.setKdtree(background()));
+  ASSERT_EQ(plan(k),KinodynamicAstar::REACH_HORIZON);
+  const auto visited=k.getVisitedNodes(); ASSERT_EQ(visited.size(),125u);
+  std::set<std::array<double,3>> controls;
+  controls.insert({0,0,0});
+  for (const auto node:visited) {
+    if (!node->parent) continue;
+    ASSERT_EQ(node->parent,visited.front());
+    EXPECT_DOUBLE_EQ(node->duration,c.max_tau);
+    EXPECT_LE(node->input.cwiseAbs().maxCoeff(),c.max_acc);
+    controls.insert({node->input.x(),node->input.y(),node->input.z()});
+  }
+  ASSERT_EQ(controls.size(),125u);
+  for (double x:{-2.,-1.,0.,1.,2.}) for (double y:{-2.,-1.,0.,1.,2.})
+    for (double z:{-2.,-1.,0.,1.,2.}) EXPECT_EQ(controls.count({x,y,z}),1u);
+  c.allocate_num=124; KinodynamicAstar short_pool(c); ASSERT_TRUE(short_pool.setKdtree(background()));
+  EXPECT_EQ(plan(short_pool),KinodynamicAstar::NODE_LIMIT);
+  EXPECT_TRUE(short_pool.getSegments().empty());
+}
+// Read actual allocated primitive inputs, including init mode, rather than duplicating enumeration.
+TEST(Search, SmallPositiveParametersRespectAccelerationAndTwentyInitialDurations) {
+  for (double initial_duration:{0.8,1e-6}) {
+    auto c=config(); c.max_acc=1e-4; c.init_max_tau=initial_duration;
+    c.time_resolution=initial_duration/40; c.horizon=0.1;
+    KinodynamicAstar k(c); ASSERT_TRUE(k.setKdtree(background()));
+    ASSERT_EQ(k.search({0,0,1},{1,0,0},{1e-4,-1e-4,0},{4,0,1},{0,0,0},true,true),
+              KinodynamicAstar::REACH_HORIZON);
+    const auto nodes=k.getVisitedNodes(); ASSERT_FALSE(nodes.empty());
+    std::set<double> initial_durations;
+    for (const auto node:nodes) {
+      EXPECT_LE(node->input.cwiseAbs().maxCoeff(),c.max_acc);
+      if (node->parent!=nodes.front()) continue;
+      EXPECT_EQ(node->input,Vector3d(1e-4,-1e-4,0));
+      EXPECT_GT(node->duration,0); EXPECT_LE(node->duration,initial_duration);
+      initial_durations.insert(node->duration);
+    }
+    ASSERT_EQ(initial_durations.size(),20u);
+    EXPECT_DOUBLE_EQ(*initial_durations.rbegin(),initial_duration);
+  }
+  for (double acceleration:{1e-4,1e-8,1e-12}) {
+    auto c=config(); c.max_acc=acceleration; c.horizon=0.1;
+    KinodynamicAstar k(c); ASSERT_TRUE(k.setKdtree(background()));
+    const auto began=std::chrono::steady_clock::now();
+    ASSERT_EQ(plan(k,{0,0,1},{4,0,1},{1,0,0}),KinodynamicAstar::REACH_HORIZON);
+    EXPECT_LT(std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count(),0.5);
+    for (const auto node:k.getVisitedNodes()) EXPECT_LE(node->input.cwiseAbs().maxCoeff(),acceleration);
+  }
+}
+TEST(Search, NumericRangeAndAccelerationInputFailuresAreExplicit) {
+  const double denormal=std::numeric_limits<double>::denorm_min();
+  for (double tiny:{denormal,std::numeric_limits<double>::min()}) {
+    auto c=config(); c.init_max_tau=tiny; EXPECT_THROW(c.validate(),std::invalid_argument);
+    c=config(); c.max_tau=tiny; EXPECT_THROW(c.validate(),std::invalid_argument);
+  }
+  auto c=config(); c.max_acc=denormal; EXPECT_THROW(c.validate(),std::invalid_argument);
+  c=config(); c.time_resolution=denormal; EXPECT_THROW(c.validate(),std::invalid_argument);
+  c.time_resolution=std::numeric_limits<double>::min(); EXPECT_NO_THROW(c.validate());
+  c=config(); c.max_acc=std::numeric_limits<double>::max(); EXPECT_THROW(c.validate(),std::invalid_argument);
+  c=config(); c.init_max_tau=std::numeric_limits<double>::max(); EXPECT_THROW(c.validate(),std::invalid_argument);
+  // Exercise both sides of the smallest representable initial squared-duration boundary.
+  c=config(); c.init_max_tau=20*std::sqrt(denormal); EXPECT_NO_THROW(c.validate());
+  c.init_max_tau/=2; EXPECT_THROW(c.validate(),std::invalid_argument);
+  c=config(); c.max_acc=1e-8; KinodynamicAstar k(c); ASSERT_TRUE(k.setKdtree(background()));
+  for (bool init:{false,true}) {
+    EXPECT_EQ(k.search({0,0,1},{0,0,0},{std::nextafter(c.max_acc,INFINITY),0,0},
+                       {4,0,1},{0,0,0},init),KinodynamicAstar::INVALID_INPUT);
+    EXPECT_TRUE(k.getSegments().empty());
+  }
+  EXPECT_EQ(k.search({0,0,1},{0,0,0},{0,0,0},{4,0,1},{0,0,0},false,true,1e300),
+            KinodynamicAstar::INVALID_INPUT);
+  c=config(); c.max_acc=1e150; c.search_budget=0.02;
+  KinodynamicAstar large(c); ASSERT_TRUE(large.setKdtree(background()));
+  const auto began=std::chrono::steady_clock::now();
+  const int status=plan(large);
+  EXPECT_TRUE(status==KinodynamicAstar::NO_PATH || status==KinodynamicAstar::TIMEOUT);
+  EXPECT_TRUE(large.getSegments().empty());
+  EXPECT_LT(std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count(),0.5);
+}
+// The normal period is 50 accepted clouds. Mark each bank independently at its first update.
+TEST(Search, DefaultTreePeriodSwitchesAtExactAcceptedUpdateBoundaries) {
+  KinodynamicAstar k(config());
+  for (int update=1;update<=101;++update) {
+    auto cloud=background();
+    if (update==1) cloud.push_back({2,0,1});
+    if (update==51) cloud.push_back({4,0,1});
+    ASSERT_TRUE(k.setKdtree(cloud));
+    if (update==49 || update==50 || update==51 || update==99 || update==100 || update==101) {
+      EXPECT_EQ(k.isSafe(2,0,1),update==101) << "update " << update;
+      EXPECT_EQ(k.isSafe(4,0,1),update<51) << "update " << update;
+      EXPECT_LE(k.mapPointCount(),4u);
+    }
+  }
+}
+TEST(Search, SampleCapIsExactAcrossSegmentJoinsAndRejectsHugeRatios) {
+  auto c=config(); c.horizon=0.1; KinodynamicAstar k(c); ASSERT_TRUE(k.setKdtree(background()));
+  ASSERT_EQ(plan(k),KinodynamicAstar::REACH_HORIZON);
+  const auto samples=k.sampleTrajectory(0.1); ASSERT_GT(samples.size(),1u);
+  EXPECT_EQ(k.sampleTrajectory(0.1,samples.size()).size(),samples.size());
+  EXPECT_THROW(k.sampleTrajectory(0.1,samples.size()-1),std::length_error);
+  EXPECT_THROW(k.sampleTrajectory(std::numeric_limits<double>::denorm_min()),std::length_error);
+  EXPECT_THROW(k.sampleTrajectory(0.1,0),std::length_error);
+  KinodynamicAstar full_planner(config()); ASSERT_TRUE(full_planner.setKdtree(background()));
+  ASSERT_EQ(plan(full_planner),KinodynamicAstar::REACH_END);
+  const auto full=full_planner.sampleTrajectory(0.07);
+  EXPECT_GT(full_planner.getSegments().size(),1u);
+  EXPECT_EQ(full_planner.sampleTrajectory(0.07,full.size()).size(),full.size());
+  EXPECT_THROW(full_planner.sampleTrajectory(0.07,full.size()-1),std::length_error);
 }
 TEST(Search, TwoTreesRetainThenExpireAndStayBounded) {
   auto c=config(); c.tree_period=2; KinodynamicAstar k(c); auto cloud=background(); cloud.push_back({2,0,1});

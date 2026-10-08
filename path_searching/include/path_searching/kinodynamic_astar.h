@@ -32,7 +32,7 @@ struct SearchConfig {
   std::size_t max_cloud_points = 500000;
   // Inclusive world-frame position bounds (m), shared by primitives and terminal curves.
   Eigen::Vector3d lower{-50.0, -50.0, 0.2}, upper{50.0, 50.0, 10.0};
-  /// Throws std::invalid_argument for invalid numeric values, bounds or resource limits.
+  /// Throws std::invalid_argument for invalid/unrepresentable numeric values, bounds or resource limits.
   void validate() const;
 };
 
@@ -147,7 +147,10 @@ class KinodynamicAstar {
   /// Sample at intervals <= step seconds, including exact endpoints and every segment boundary.
   /// Boundary acceleration is the preceding segment's end value. Empty result yields no samples.
   /// Throws invalid_argument for nonpositive/nonfinite step, length_error above the sample cap.
+  static constexpr std::size_t kMaxTrajectorySamples = 1000000;
   std::vector<TrajectorySample> sampleTrajectory(double step) const;
+  /// A tighter caller cap is checked for the whole trajectory before samples are allocated.
+  std::vector<TrajectorySample> sampleTrajectory(double step, std::size_t max_samples) const;
   /// Position-only convenience view of sampleTrajectory(); identical sampling and exceptions.
   std::vector<Eigen::Vector3d> getKinoTraj(double step) const;
   /// Diagnostic view of allocated nodes (open and closed), not just expanded nodes.

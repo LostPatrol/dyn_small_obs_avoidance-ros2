@@ -49,6 +49,8 @@ source install/setup.bash
 ```
 
 脚本自动启动和回收规划器，输出规划结果与耗时统计。
+默认与正式 launch 共享安装目录的 `planner.yaml`（300 ms 搜索预算）；
+可用 `--config` 指定副本，或用 `--search-budget 0.08` / `0.3` 分别实测。
 示例起点固定，不模拟飞机沿路径运动。
 显示障碍点云和规划路径的方法见 [RViz2 可视化](USAGE.md#rviz2-可视化)。
 
@@ -72,6 +74,7 @@ ros2 topic pub --once /goal geometry_msgs/msg/PoseStamped \
 [planner.yaml](../path_planning/config/planner.yaml) 中的坐标系和规划边界，
 通过 `config:=/absolute/path/planner.yaml` 加载配置副本。
 规划结果发布到 `/plan_result` 和 `/kino_path`。
+当前有效性以 `PlanResult` 为准；`/kino_path` 保留最后成功预览，失败时不刷新旧时间戳。
 ROS2 bag 回放、输入约定和参数说明见[使用指南](USAGE.md)。
 
 ## 5. 配套文档

@@ -49,6 +49,8 @@ Run a synthetic pole-avoidance example without a sensor or flight controller:
 ```
 
 The script starts and stops the planner automatically, and reports planning results and timing.
+It loads the same installed `planner.yaml` as the regular launch (300 ms search budget).
+Use `--config /absolute/path/planner.yaml` or an explicit `--search-budget 0.08` / `0.3` for comparisons.
 It tests planning with a stationary starting position; it does not simulate a vehicle following the path.
 See the [RViz2 instructions](docs/USAGE.md#rviz2-可视化) to display the obstacle cloud and planned path.
 
@@ -71,6 +73,8 @@ ros2 topic pub --once /goal geometry_msgs/msg/PoseStamped \
 The default planning frame is `camera_init`. Adjust it and the planning bounds in
 [planner.yaml](path_planning/config/planner.yaml); load your copy with `config:=/absolute/path/planner.yaml`.
 Results are published on `/plan_result` and `/kino_path`.
+`PlanResult` is authoritative for current validity; `/kino_path` retains the last successful preview
+with its original timestamp when a later attempt fails.
 ROS 2 bag replay, input conventions and configuration are described in the [usage guide](docs/USAGE.md).
 
 ## 5. Documentation

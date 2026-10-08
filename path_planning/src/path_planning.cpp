@@ -1,4 +1,5 @@
-// GPL-3.0: standalone Jazzy planning orchestration; preserves upstream search, removes demo flight coupling.
+// GPL-3.0: Jazzy orchestration with strict XYZ layouts and bounded, freshness-gated outputs.
+#include "output_contract.hpp"
 #include <path_searching/kinodynamic_astar.h>
 #include <path_planning/msg/plan_result.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -11,6 +12,7 @@
 #include <limits>
 #include <algorithm>
 #include <deque>
+#include <array>
 
 using Result = path_planning::msg::PlanResult;
 using Clock = std::chrono::steady_clock;
@@ -24,6 +26,8 @@ constexpr uint32_t kNanosecondsPerSecond = 1000000000u;  // ROS time requires na
 constexpr uint32_t kFloat32Bytes = 4;  // PointField::FLOAT32 wire width, independent of struct padding.
 constexpr uint32_t kXyzFieldCount = 3;  // Required scalar x/y/z; other fields may coexist.
 constexpr size_t kBlindPoseHistorySize = 256;  // Bounded history (~0.64 s at 400 Hz).
+constexpr int kMaxOutputSamples = 1000000;  // Matches the core's absolute sampling allocation cap.
+constexpr double kMaxOutputDuration = 3600.0;  // Seconds; avoids unbounded/ROS-duration-sized outputs.
 }  // namespace
 
 // Single executor serializes map updates and searches; depth-one subscriptions bound backlog.
@@ -50,6 +54,9 @@ class Planner : public rclcpp::Node {
     frame_=declare_parameter("planning_frame", "camera_init");
     rate_=declare_parameter("planning_rate",10.0); timeout_=declare_parameter("input_timeout",0.5);
     step_=declare_parameter("sample_step",0.02); stamp_clock_=declare_parameter("stamp_clock","ros");
+    max_samples_=declare_parameter("output.max_samples",10000);
+    max_duration_=declare_parameter("output.max_duration",60.0);
+    build_budget_=declare_parameter("output.build_budget",0.1);
     body_twist_=declare_parameter("odometry_twist_in_body",true);
     blind_radius_=declare_parameter("cloud.blind_radius",0.0);
     blind_pose_tolerance_=declare_parameter("cloud.blind_pose_tolerance",0.05);
@@ -61,6 +68,8 @@ class Planner : public rclcpp::Node {
         !positive(blind_wait_) || blind_wait_>timeout_ ||
         !blind_offset_.allFinite()) throw std::invalid_argument("invalid blind filter parameters");
     if (frame_.empty() || !positive(rate_) || rate_>kMaxPlanningRateHz || !positive(timeout_) || !positive(step_) ||
+        max_samples_<1 || max_samples_>kMaxOutputSamples || !positive(max_duration_) ||
+        max_duration_>kMaxOutputDuration || !positive(build_budget_) ||
         (stamp_clock_!="ros" && stamp_clock_!="receive")) throw std::invalid_argument("invalid wrapper parameters");
     // Best-effort subscribers match either sensor reliability policy. Results/goals are reliable
     // and volatile: a newly connected consumer must wait for a fresh result rather than a latched path.
@@ -99,7 +108,29 @@ class Planner : public rclcpp::Node {
     pending_cloud_.reset();
     core_->clearMap(); cloud_status_=status; cloud_detail_=detail;
   }
-  // Check PointCloud2 layout before PCL conversion, including padding and scalar XYZ fields.
+  // Validate exactly the XYZ fields PCL will match; duplicate names cannot select an unchecked
+  // offset. Other fields, field ordering, point padding and row padding remain compatible.
+  static bool validXyzLayout(const sensor_msgs::msg::PointCloud2& m) {
+    std::array<uint32_t,kXyzFieldCount> offsets{};
+    size_t coordinate=0;
+    for (const auto* name:{"x","y","z"}) {
+      const sensor_msgs::msg::PointField* selected=nullptr;
+      for (const auto& field:m.fields) {
+        if (field.name!=name) continue;
+        if (selected) return false;
+        selected=&field;
+      }
+      if (!selected || selected->datatype!=sensor_msgs::msg::PointField::FLOAT32 ||
+          selected->count!=1 || uint64_t(selected->offset)+kFloat32Bytes>m.point_step) return false;
+      offsets[coordinate++]=selected->offset;
+    }
+    for (size_t i=0;i<offsets.size();++i)
+      for (size_t j=i+1;j<offsets.size();++j)
+        if (uint64_t(offsets[i])<uint64_t(offsets[j])+kFloat32Bytes &&
+            uint64_t(offsets[j])<uint64_t(offsets[i])+kFloat32Bytes) return false;
+    return true;
+  }
+  // Reject malformed memory layout before PCL gets access to the message buffer.
   void cloud(const sensor_msgs::msg::PointCloud2& m) {
     if (!correctFrame(m.header)) { invalidateCloud(Result::FRAME_MISMATCH,"cloud frame mismatch"); return; }
     if (!validStamp(m.header.stamp)) { invalidateCloud(Result::INVALID_INPUT,"invalid cloud timestamp"); return; }
@@ -112,12 +143,7 @@ class Planner : public rclcpp::Node {
     const uint64_t count=uint64_t(m.width)*m.height;
     bool valid=count>0 && count<=core_->config().max_cloud_points && !m.is_bigendian && m.point_step>=kXyzFieldCount*kFloat32Bytes &&
         uint64_t(m.row_step)>=uint64_t(m.width)*m.point_step && m.data.size()==uint64_t(m.row_step)*m.height;
-    for (const auto* name:{"x","y","z"}) {
-      bool found=false;
-      for (const auto& f:m.fields) if (f.name==name && f.datatype==sensor_msgs::msg::PointField::FLOAT32 &&
-          f.count==1 && uint64_t(f.offset)+kFloat32Bytes<=m.point_step) found=true;
-      valid=valid && found;
-    }
+    valid=valid && validXyzLayout(m);
     if (!valid) { invalidateCloud(Result::INVALID_INPUT,"empty, oversized or malformed XYZ cloud"); return; }
     const auto received=Clock::now();
     if (!fresh(received,m.header.stamp)) { invalidateCloud(Result::STALE_INPUT,"cloud stamp outside age limit"); return; }
@@ -237,16 +263,35 @@ class Planner : public rclcpp::Node {
     }
     nav_msgs::msg::Path path; path.header=result.header;
     result.trajectory.header=result.header; result.trajectory.joint_names={"position"};
+    const auto output_began=Clock::now();
+    const auto within_budget=[&] {
+      return std::chrono::duration<double>(Clock::now()-output_began).count()<=build_budget_;
+    };
     if (result.status==Result::REACH_END || result.status==Result::REACH_HORIZON) {
       // Serialize exact search coefficients; the sampled trajectory and Path are views of these
       // same curves, not separately interpolated paths. Identity orientation does not plan yaw.
-      for (const auto& s:core_->getSegments()) {
-        path_planning::msg::PolynomialSegment msg; msg.duration=s.duration;
-        for (int i=0;i<4;++i) { msg.x[i]=s.coefficients(0,i); msg.y[i]=s.coefficients(1,i); msg.z[i]=s.coefficients(2,i); }
-        result.segments.push_back(msg);
-      }
       try {
-        for (const auto& s:core_->sampleTrajectory(step_)) {
+        const auto segments=core_->getSegments();
+        double duration=0;
+        for (const auto& s:segments) {
+          duration+=s.duration;
+          if (!positive(s.duration) || !std::isfinite(duration) || duration>max_duration_)
+            throw std::length_error("output trajectory duration limit exceeded");
+        }
+        for (const auto& s:segments) {
+          path_planning::msg::PolynomialSegment msg; msg.duration=s.duration;
+          for (int i=0;i<4;++i) { msg.x[i]=s.coefficients(0,i); msg.y[i]=s.coefficients(1,i); msg.z[i]=s.coefficients(2,i); }
+          result.segments.push_back(msg);
+        }
+        // The core prechecks the entire sample count before allocation. The wall-clock budget
+        // is cooperative: a single allocation/sample call can finish after the deadline.
+        const auto samples=core_->sampleTrajectory(step_,static_cast<size_t>(max_samples_));
+        result.trajectory.points.reserve(samples.size()); path.poses.reserve(samples.size());
+        for (const auto& s:samples) {
+          if (!within_budget()) {
+            path_planning::rejectOutput(result,path,Result::TIMEOUT,"output construction budget exceeded");
+            break;
+          }
           trajectory_msgs::msg::MultiDOFJointTrajectoryPoint point;
           geometry_msgs::msg::Transform p; p.rotation.w=1;
           p.translation.x=s.position.x(); p.translation.y=s.position.y(); p.translation.z=s.position.z();
@@ -261,17 +306,21 @@ class Planner : public rclcpp::Node {
           pose.pose.orientation.w=1; path.poses.push_back(pose);
         }
       } catch (const std::exception& e) {
-        result.status=Result::INVALID_INPUT; result.detail=e.what(); result.segments.clear();
-        result.trajectory.points.clear(); path.poses.clear();
+        path_planning::rejectOutput(result,path,Result::INVALID_INPUT,e.what());
       }
     }
     result.map_points=core_->mapPointCount();
+    // This is the sole success publication gate, after all curve/message construction.
+    // It covers time before publish(), not DDS queuing or a consumer's execution delay.
+    path_planning::finalizeOutput(result,path,[&] {
+      return fresh(cloud_received_,cloud_stamp_) && fresh(odom_received_,odom_stamp_);
+    },within_budget);
     result_pub_->publish(result);
     if (!path.poses.empty()) path_pub_->publish(path);
   }
   std::unique_ptr<KinodynamicAstar> core_;
   std::string frame_,stamp_clock_,cloud_detail_="no cloud received";
-  double rate_,timeout_,step_; bool body_twist_;
+  double rate_,timeout_,step_,max_duration_,build_budget_; int max_samples_; bool body_twist_;
   // Startup-only filter: old accumulated observations are never recropped as the vehicle moves.
   struct BlindPose { int64_t stamp; Vector origin; };
   std::deque<BlindPose> blind_poses_;

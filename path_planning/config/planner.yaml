@@ -26,6 +26,13 @@ path_planning:
     # Seconds, >0: maximum output sample interval. Exact segment endpoints are always included.
     # Smaller values increase serialization/DDS cost; this does not set collision-check resolution.
     sample_step: 0.02
+    # [1,1000000]: full output point cap, checked before sample allocation; exceeding it fails empty.
+    output.max_samples: 10000
+    # Seconds, (0,3600]: cap on the full curve duration; exceeding it fails empty without truncation.
+    output.max_duration: 60.0
+    # Seconds, >0: cooperative construction budget, excluding search and DDS publish/queuing.
+    # Checked while constructing and immediately before publish; one allocation may overrun it.
+    output.build_budget: 0.1
 
     # Seconds, >0: regular acceleration-primitive duration; larger steps change search reach/granularity.
     search.max_tau: 0.6
