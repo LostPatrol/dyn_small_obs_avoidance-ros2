@@ -46,6 +46,18 @@ TEST(Search, StraightAndExactEndpoint) {
   KinodynamicAstar k(config()); auto c=background(); ASSERT_TRUE(k.setKdtree(c));
   ASSERT_EQ(plan(k),KinodynamicAstar::REACH_END); validate(k,c,{4,0,1});
 }
+// ROS1 uses only SAFE_DIST, even after voxel filtering; an exact boundary is accepted.
+TEST(Search, Ros1ClearanceHasNoExtraInflationAndUsesStrictBoundary) {
+  pcl::PointCloud<pcl::PointXYZ> cloud; cloud.push_back({0,0,1});
+  KinodynamicAstar k(config()); ASSERT_TRUE(k.setKdtree(cloud));
+  EXPECT_FALSE(k.isSafe(0.44,0,1));
+  EXPECT_TRUE(k.isSafe(0.46,0,1));  // Previously rejected by the 0.648205 m inflated radius.
+  auto c=config(); c.safe_distance=0.5; KinodynamicAstar boundary(c);
+  ASSERT_TRUE(boundary.setKdtree(cloud));
+  EXPECT_FALSE(boundary.isSafe(0.49,0,1));
+  EXPECT_TRUE(boundary.isSafe(0.5,0,1));  // 0.5² is exactly representable in PCL's float distances.
+  EXPECT_TRUE(boundary.isSafe(0.51,0,1));
+}
 TEST(Search, NonzeroThreeAxisVelocityAndHigherAltitude) {
   KinodynamicAstar k(config()); auto c=background(); k.setKdtree(c);
   ASSERT_EQ(plan(k,{0,0,3},{3,2,4},{0.3,-0.2,0.1}),KinodynamicAstar::REACH_END);

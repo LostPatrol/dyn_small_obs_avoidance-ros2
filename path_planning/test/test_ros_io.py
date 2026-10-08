@@ -152,9 +152,10 @@ def test_planner_process(tmp_path, blind_radius):
             wait_for(lambda r: r.status == r.FRAME_MISMATCH, lambda: feed(frame='wrong'))
             wait_for(lambda r: r.status == r.REACH_END, lambda: (feed(), target()))
             if blind_radius:
-                # Outside the sphere remains an obstacle; an entirely removed frame is not free space.
+                # At x=-0.4, distance to sensor centre x=0.2 is 0.6 (>blind radius),
+                # but distance to start is 0.4 (<ROS1 clearance): retain it and reject the start.
                 wait_for(lambda r: r.status == r.NO_PATH,
-                         lambda: feed(points=((-20.,-20.,1.),(-.55,0.,1.))))
+                         lambda: feed(points=((-20.,-20.,1.),(-.4,0.,1.))))
                 no_map = wait_for(lambda r: r.status == r.NO_MAP,
                                   lambda: feed(points=((.1,0.,1.),)))
                 assert no_map.map_points == 0 and not no_map.segments

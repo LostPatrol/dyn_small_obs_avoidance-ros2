@@ -99,12 +99,12 @@ bool KinodynamicAstar::inBounds(const Eigen::Vector3d& p) const {
 }
 bool KinodynamicAstar::isSafe(double x, double y, double z) {
   if (!map_ready_ || !inBounds({x,y,z})) return false;
-  // Centroid voxel displacement + half sampling interval conservatively cover between-sample collisions.
-  const double radius = config_.safe_distance + std::sqrt(3.0)*config_.voxel_size + config_.collision_step/2;
+  // Match upstream SAFE_DIST: compare against stored voxel centroids, without extra inflation.
+  const double radius = config_.safe_distance;
   for (std::size_t i=0; i<2; ++i) {
     if (clouds_[i]->empty()) continue;
     if (trees_[i].nearestKSearch(pcl::PointXYZ(x,y,z), 1, nearest_indices_, nearest_distances_) != 1 ||
-        nearest_distances_[0] <= radius*radius) return false;
+        nearest_distances_[0] < radius*radius) return false;
   }
   return true;
 }

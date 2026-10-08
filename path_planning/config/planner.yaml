@@ -52,12 +52,13 @@ path_planning:
     search.resolution: 0.1
     # Seconds, >0: hash time-bin width for core dynamic=true; unused by the current ROS wrapper.
     search.time_resolution: 0.8
-    # Meters, >0: clearance from obstacle points before conservative sampling/voxel compensation.
+    # Meters, >0: ROS1 SAFE_DIST; reject nearest stored centroid distances strictly below this value.
+    # No extra voxel/sampling inflation; this does not guarantee clearance from every raw point.
     search.safe_distance: 0.45
-    # Meters, >0: voxel edge for accumulated clouds. Larger values reduce detail and enlarge compensation.
+    # Meters, >0: voxel edge for accumulated clouds; matches ROS1's 0.1 m leaf size.
     search.voxel_size: 0.1
     # Meters, >0 and <=safe_distance: maximum travel interval between collision checks.
-    # Effective radius = safe_distance + sqrt(3)*voxel_size + collision_step/2 (~0.6482 m here).
+    # Sampling density is independent of the radius; effective radius = safe_distance (0.45 m).
     search.collision_step: 0.05
     # Seconds, (0,60]: cooperative search budget, excluding map building and result serialization.
     # A difficult search can exceed the nominal 100 ms timer period; 10 Hz output is not guaranteed.

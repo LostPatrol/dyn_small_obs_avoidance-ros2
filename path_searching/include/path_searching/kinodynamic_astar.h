@@ -23,7 +23,7 @@ struct SearchConfig {
   // Spatial hash cell size (m); time hash bin size (s), used only with dynamic=true.
   double resolution = 0.1, time_resolution = 0.8;
   // Clearance (m), voxel edge (m), maximum collision-sampling travel interval (m).
-  // Queries add sqrt(3)*voxel_size + collision_step/2 to safe_distance.
+  // Match ROS1: reject distances strictly below safe_distance, without voxel/sampling inflation.
   double safe_distance = 0.45, voxel_size = 0.1, collision_step = 0.05;
   double search_budget = 0.08;  // steady-clock seconds per search, excludes map construction
   // Node-pool capacity; valid cloud updates per bank before alternating to the other tree.
@@ -125,7 +125,7 @@ class KinodynamicAstar {
   bool mapReady() const { return map_ready_; }
   /// Sum of filtered points in both banks, including points duplicated across banks.
   std::size_t mapPointCount() const;
-  /// Point-clearance query with conservative inflation; false for no map or out-of-bounds input.
+  /// ROS1 point-clearance rule against voxel centroids; false for no map or out-of-bounds input.
   /// True only concerns stored obstacle points, not unobserved space or future obstacle motion.
   bool isSafe(double x, double y, double z);
   /// Finite position inside inclusive configured bounds; does not query obstacles.
