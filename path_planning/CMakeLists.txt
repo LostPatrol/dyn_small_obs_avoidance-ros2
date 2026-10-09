@@ -16,8 +16,8 @@ find_package(std_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/PolynomialSegment.msg" "msg/PlanResult.msg"
-  DEPENDENCIES std_msgs builtin_interfaces trajectory_msgs)
+  "msg/PolynomialSegment.msg" "msg/PlanResult.msg" "srv/PlanMotion.srv"
+  DEPENDENCIES std_msgs builtin_interfaces trajectory_msgs geometry_msgs)
 add_executable(path_planning_node src/path_planning.cpp)
 target_compile_features(path_planning_node PRIVATE cxx_std_17)
 target_compile_options(path_planning_node PRIVATE -Wall -Wextra -Wpedantic)
@@ -33,6 +33,7 @@ if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_pytest_test(ros_io test/test_ros_io.py TIMEOUT 150)
+  ament_add_pytest_test(motion_service test/test_motion_service.py TIMEOUT 60)
   ament_add_pytest_test(benchmark_unit test/test_benchmark.py TIMEOUT 30)
   ament_add_gtest(test_output_contract test/test_output_contract.cpp)
   target_compile_features(test_output_contract PRIVATE cxx_std_17)

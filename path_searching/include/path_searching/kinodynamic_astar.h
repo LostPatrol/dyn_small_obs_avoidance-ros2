@@ -12,17 +12,21 @@
 #include <vector>
 
 /// Search and obstacle-map configuration in SI units.
-/// Limits are per axis, not Euclidean norms. Bounds do not imply observed free space.
+/// Legacy limits are per axis; optional limits add horizontal norms/vertical absolutes.
+/// Bounds do not imply observed free space.
 /// The constructor copies this configuration; changing the caller's copy has no effect.
 struct SearchConfig {
   // Primitive duration (s), initial fixed-acceleration duration (s), velocity (m/s), acceleration (m/s²).
   double max_tau = 0.6, init_max_tau = 0.8, max_vel = 2.0, max_acc = 2.0;
+  // Optional horizontal norms and vertical absolute limits; zero preserves legacy axis limits.
+  double max_horizontal_vel = 0, max_vertical_vel = 0;
+  double max_horizontal_acc = 0, max_vertical_acc = 0;
   // Cost integrates squared acceleration + w_time; horizon is displacement from start (m).
   // lambda_heu weights the upstream heuristic, so global optimality is not guaranteed.
   double w_time = 10.0, horizon = 100.0, lambda_heu = 5.0;
   // Spatial hash cell size (m); time hash bin size (s), used only with dynamic=true.
   double resolution = 0.1, time_resolution = 0.8;
-  // Clearance (m), voxel edge (m), maximum collision-sampling travel interval (m).
+  // Clearance (m), voxel edge (m), legacy collision-sampling setting retained for configuration.
   // Match ROS1: reject distances strictly below safe_distance, without voxel/sampling inflation.
   double safe_distance = 0.45, voxel_size = 0.1, collision_step = 0.05;
   double search_budget = 0.08;  // steady-clock seconds per search, excludes map construction
@@ -121,6 +125,14 @@ class KinodynamicAstar {
    * A successful update does not revalidate an existing trajectory: run search() again.
    */
   bool setKdtree(const pcl::PointCloud<pcl::PointXYZ>& cloud);
+  /// Replace both banks with a caller-maintained cumulative, coverage-validated observation map.
+  /// This does not infer disappearance from missing points; the caller owns that decision.
+  bool setLatestObservation(const pcl::PointCloud<pcl::PointXYZ>& cloud);
+  /// Exact closed-segment clearance against current voxel centroids; no A* or trajectory mutation.
+  int checkLine(const Eigen::Vector3d& start, const Eigen::Vector3d& goal);
+  /// Validate the unexecuted suffix and exact terminal position of caller-supplied curves.
+  int validateTrajectory(const std::vector<TrajectorySegment>& segments, double elapsed,
+                         const Eigen::Vector3d& goal);
   /// True means an accepted nonempty map exists, not that it is fresh or covers the requested route.
   bool mapReady() const { return map_ready_; }
   /// Sum of filtered points in both banks, including points duplicated across banks.
@@ -169,9 +181,9 @@ class KinodynamicAstar {
   Eigen::Matrix<double, 6, 6> phi_ = Eigen::Matrix<double, 6, 6>::Identity();
   std::array<pcl::search::KdTree<pcl::PointXYZ>, 2> trees_;
   std::array<pcl::PointCloud<pcl::PointXYZ>::Ptr, 2> clouds_;
-  // Reuse nearest-neighbor buffers: collision checks are the inner search loop.
-  std::vector<int> nearest_indices_{0};
-  std::vector<float> nearest_distances_{0.0f};
+  // Reuse radius-query candidate buffers; float PCL distances never decide clearance.
+  std::vector<int> query_indices_;
+  std::vector<float> query_distances_;
   std::size_t cloud_input_num_ = 0;
   bool map_ready_ = false, is_shot_succ_ = false;
   Eigen::Matrix<double, 3, 4> coef_shot_ = Eigen::Matrix<double, 3, 4>::Zero();
@@ -192,6 +204,9 @@ class KinodynamicAstar {
   std::vector<double> quartic(double a, double b, double c, double d, double e);
   bool computeShotTraj(Eigen::VectorXd start, Eigen::VectorXd end, double duration);
   double estimateHeuristic(Eigen::VectorXd start, Eigen::VectorXd end, double& duration);
+  bool velocityAllowed(const Eigen::Vector3d& value) const;
+  bool accelerationAllowed(const Eigen::Vector3d& value) const;
+  bool curveSafe(const Eigen::Matrix<double, 3, 4>& coefficients, double duration);
   void stateTransit(Eigen::Matrix<double, 6, 1>& start, Eigen::Matrix<double, 6, 1>& end,
                     Eigen::Vector3d acceleration, double duration);
 };

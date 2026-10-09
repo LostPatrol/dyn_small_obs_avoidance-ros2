@@ -58,6 +58,27 @@ TEST(Search, Ros1ClearanceHasNoExtraInflationAndUsesStrictBoundary) {
   EXPECT_TRUE(boundary.isSafe(0.5,0,1));  // 0.5² is exactly representable in PCL's float distances.
   EXPECT_TRUE(boundary.isSafe(0.51,0,1));
 }
+// PCL's float query/distances previously rejected both the exact double boundary and outside 1nm.
+TEST(Search, DoubleEndpointBoundaryAndNanometreOffset) {
+  KinodynamicAstar k(config()); pcl::PointCloud<pcl::PointXYZ> cloud; cloud.push_back({.5,0,1});
+  ASSERT_TRUE(k.setKdtree(cloud));
+  EXPECT_TRUE(k.isSafe(.05,0,1));
+  EXPECT_TRUE(k.isSafe(.049999999,0,1));
+  EXPECT_FALSE(k.isSafe(.050000001,0,1));
+  EXPECT_EQ(plan(k,{.05,0,1},{-.5,0,1}),KinodynamicAstar::REACH_END);
+  EXPECT_EQ(plan(k,{.049999999,0,1},{-.5,0,1}),KinodynamicAstar::REACH_END);
+  EXPECT_EQ(plan(k,{.050000001,0,1},{-.5,0,1}),KinodynamicAstar::NO_PATH);
+  // A held boundary position exercises both start and goal gates without interpolation roundoff.
+  EXPECT_EQ(plan(k,{.05,0,1},{.05,0,1}),KinodynamicAstar::REACH_END);
+  EXPECT_EQ(plan(k,{.049999999,0,1},{.049999999,0,1}),KinodynamicAstar::REACH_END);
+  // Two PCL float distances tie at 0.5m; the double query is 1nm closer to the right centroid.
+  auto cfg=config(); cfg.safe_distance=.5; KinodynamicAstar tied(cfg);
+  cloud.clear(); cloud.push_back({-.5,0,1}); cloud.push_back({.5,0,1});
+  ASSERT_TRUE(tied.setKdtree(cloud));
+  EXPECT_TRUE(tied.isSafe(0,0,1));
+  EXPECT_FALSE(tied.isSafe(.000000001,0,1));
+  EXPECT_FALSE(tied.isSafe(-.000000001,0,1));
+}
 TEST(Search, NonzeroThreeAxisVelocityAndHigherAltitude) {
   KinodynamicAstar k(config()); auto c=background(); k.setKdtree(c);
   ASSERT_EQ(plan(k,{0,0,3},{3,2,4},{0.3,-0.2,0.1}),KinodynamicAstar::REACH_END);
@@ -262,4 +283,74 @@ TEST(Search, CollisionBetweenPrimitiveEndpoints) {
   k.setKdtree(c);
   ASSERT_EQ(plan(k,{0,0,1},{3,0,1},{1.2,0,0}),KinodynamicAstar::REACH_END);
   validate(k,c,{3,0,1});
+}
+// Closed-segment checks use independent point geometry, including strict equality and endpoints.
+TEST(Search, ExactLineAndLatestObservationMap) {
+  auto cfg=config(); cfg.safe_distance=.5;
+  KinodynamicAstar k(cfg); auto cloud=background(); cloud.push_back({2,.5,1});
+  ASSERT_TRUE(k.setKdtree(cloud));
+  EXPECT_EQ(k.checkLine({0,0,1},{4,0,1}),KinodynamicAstar::REACH_END);
+  cloud.push_back({2,.499,1}); ASSERT_TRUE(k.setKdtree(cloud));
+  EXPECT_EQ(k.checkLine({0,0,1},{4,0,1}),KinodynamicAstar::NO_PATH);
+  ASSERT_TRUE(k.setLatestObservation(background()));
+  EXPECT_EQ(k.checkLine({0,0,1},{4,0,1}),KinodynamicAstar::REACH_END);
+  cloud=background(); cloud.push_back({4,0,1}); ASSERT_TRUE(k.setLatestObservation(cloud));
+  EXPECT_EQ(k.checkLine({0,0,1},{4,0,1}),KinodynamicAstar::NO_PATH);
+  EXPECT_EQ(k.checkLine({4,0,1},{4,0,1}),KinodynamicAstar::NO_PATH);
+  EXPECT_EQ(k.checkLine({0,0,-1},{4,0,1}),KinodynamicAstar::INVALID_INPUT);
+  EXPECT_FALSE(k.setLatestObservation({}));
+  EXPECT_EQ(k.checkLine({0,0,1},{4,0,1}),KinodynamicAstar::NO_MAP);
+}
+// Curved suffix checks catch unsampled interior collisions and ignore already executed geometry.
+TEST(Search, ValidateRemainingCurveExactly) {
+  KinodynamicAstar k(config()); auto cloud=background(); cloud.push_back({.5,0,1});
+  ASSERT_TRUE(k.setKdtree(cloud));
+  TrajectorySegment s; s.duration=4; s.coefficients.col(0)=Vector3d(0,0,1);
+  s.coefficients.col(1)=Vector3d(1,0,0);
+  EXPECT_EQ(k.validateTrajectory({s},0,{4,0,1}),KinodynamicAstar::NO_PATH);
+  EXPECT_EQ(k.validateTrajectory({s},2,{4,0,1}),KinodynamicAstar::REACH_END);
+  EXPECT_EQ(k.validateTrajectory({s},4,{4,0,1}),KinodynamicAstar::REACH_END);
+  EXPECT_EQ(k.validateTrajectory({s},4.1,{4,0,1}),KinodynamicAstar::INVALID_INPUT);
+  EXPECT_EQ(k.validateTrajectory({s},2,{5,0,1}),KinodynamicAstar::INVALID_INPUT);
+  s.coefficients(0,0)=std::numeric_limits<double>::quiet_NaN();
+  EXPECT_EQ(k.validateTrajectory({s},0,{4,0,1}),KinodynamicAstar::INVALID_INPUT);
+  // The endpoints' straight line is clear, but the cubic crosses the obstacle at t=.5.
+  cloud=background(); cloud.push_back({.5,1.5,1}); ASSERT_TRUE(k.setLatestObservation(cloud));
+  EXPECT_EQ(k.checkLine({0,0,1},{1,0,1}),KinodynamicAstar::REACH_END);
+  s.duration=1; s.coefficients.setZero(); s.coefficients.col(0)=Vector3d(0,0,1);
+  s.coefficients(0,1)=1; s.coefficients.row(1)<<0,8,-12,4;
+  EXPECT_EQ(k.validateTrajectory({s},0,{1,0,1}),KinodynamicAstar::NO_PATH);
+  EXPECT_EQ(k.validateTrajectory({s},.9,{1,0,1}),KinodynamicAstar::REACH_END);
+}
+// Dynamics are checked on exact derivatives; the exported trajectory is never clipped.
+TEST(Search, OptionalHorizontalAndVerticalDynamics) {
+  auto cfg=config(); cfg.max_horizontal_vel=1; cfg.max_vertical_vel=.2;
+  cfg.max_horizontal_acc=.35; cfg.max_vertical_acc=.15; cfg.max_tau=1;
+  KinodynamicAstar k(cfg); auto cloud=background(); ASSERT_TRUE(k.setKdtree(cloud));
+  EXPECT_EQ(plan(k,{0,0,1},{1,0,1},{.8,.8,0}),KinodynamicAstar::INVALID_INPUT);
+  EXPECT_EQ(plan(k,{0,0,1},{1,0,1},{0,0,.21}),KinodynamicAstar::INVALID_INPUT);
+  ASSERT_EQ(plan(k,{0,0,1},{2,1,1.2},{.1,0,.05}),KinodynamicAstar::REACH_END);
+  validate(k,cloud,{2,1,1.2});
+  for (const auto& sample:k.sampleTrajectory(.001)) {
+    EXPECT_LE(sample.velocity.head<2>().norm(),1+1e-8);
+    EXPECT_LE(std::abs(sample.velocity.z()),.2+1e-8);
+    EXPECT_LE(sample.acceleration.head<2>().norm(),.35+1e-8);
+    EXPECT_LE(std::abs(sample.acceleration.z()),.15+1e-8);
+  }
+}
+TEST(Search, ConstrainedDynamicsGoesAroundPole) {
+  auto cfg=config(); cfg.max_horizontal_vel=1; cfg.max_vertical_vel=.2;
+  cfg.max_horizontal_acc=.35; cfg.max_vertical_acc=.15; cfg.max_tau=1;
+  cfg.max_vel=1; cfg.max_acc=.35; cfg.search_budget=.3;
+  KinodynamicAstar k(cfg); auto cloud=background();
+  // One point per 0.1m voxel makes the independent raw-point oracle equal the centroid contract.
+  for (float z=.25;z<10;z+=.125f) cloud.push_back({2,0,z});
+  ASSERT_TRUE(k.setKdtree(cloud)); ASSERT_EQ(plan(k),KinodynamicAstar::REACH_END);
+  validate(k,cloud,{4,0,1});
+  for (const auto& sample:k.sampleTrajectory(.001)) {
+    ASSERT_LE(sample.velocity.head<2>().norm(),1+1e-8);
+    ASSERT_LE(std::abs(sample.velocity.z()),.2+1e-8);
+    ASSERT_LE(sample.acceleration.head<2>().norm(),.35+1e-8);
+    ASSERT_LE(std::abs(sample.acceleration.z()),.15+1e-8);
+  }
 }

@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <!-- ROS2 planning wrapper only; deliberately independent of vehicles and sensor drivers. -->
 <package format="3">
-  <name>path_planning</name><version>0.1.0</version>
+  <name>path_planning</name><version>0.2.0</version>
   <description>ROS2 Jazzy wrapper for the HKU-MARS kinodynamic obstacle avoidance search.</description>
   <maintainer email="LostPatrol@users.noreply.github.com">LostPatrol</maintainer>
   <license>GPL-3.0-only</license>

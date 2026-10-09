@@ -8,3 +8,5 @@ __pycache__/
 *.db3
 *.mcap
 core
+# Local agent process artifacts; long-term evidence belongs in docs.
+agent/codex/

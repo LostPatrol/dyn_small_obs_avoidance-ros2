@@ -23,9 +23,42 @@ constexpr double kAccelerationZeroTolerance = 1e-12;  // m/s²; skip division by
 constexpr double kPolynomialZeroTolerance = 1e-12;  // SI coefficient magnitude for degenerate-root branches.
 constexpr double kDerivativeLimitSlack = 1e-9;  // Absolute numerical slack for velocity/acceleration limits.
 constexpr std::array<double, 5> kShotDurationScales{1.0, 1.5, 2.0, 3.0, 4.0};  // Bounded cubic retries.
+
+// Isolate all real polynomial roots on a closed interval through derivative monotonic partitions.
+// Degree is at most five (the squared distance derivative of a cubic); no sampled collision oracle.
+double polynomial(const std::vector<double>& c, double x) {
+  double value=0; for (auto i=c.rbegin(); i!=c.rend(); ++i) value=value*x+*i; return value;
+}
+std::vector<double> rootsInInterval(std::vector<double> c, double lower, double upper) {
+  while (c.size()>1 && c.back()==0) c.pop_back();
+  if (c.size()<2) return {};
+  if (c.size()==2) {
+    const double root=-c[0]/c[1];
+    return root>=lower && root<=upper ? std::vector<double>{root} : std::vector<double>{};
+  }
+  std::vector<double> derivative;
+  for (size_t i=1;i<c.size();++i) derivative.push_back(i*c[i]);
+  auto partitions=rootsInInterval(derivative,lower,upper);
+  partitions.insert(partitions.begin(),lower); partitions.push_back(upper);
+  std::vector<double> roots;
+  for (double t:partitions) if (polynomial(c,t)==0) roots.push_back(t);
+  for (size_t i=1;i<partitions.size();++i) {
+    double a=partitions[i-1], b=partitions[i], fa=polynomial(c,a), fb=polynomial(c,b);
+    if ((fa<0)==(fb<0) || fa==0 || fb==0) continue;
+    for (int iteration=0;iteration<80;++iteration) {
+      const double mid=a+(b-a)/2, fm=polynomial(c,mid);
+      if (mid==a || mid==b) break;
+      if ((fa<0)==(fm<0)) { a=mid; fa=fm; } else b=mid;
+    }
+    roots.push_back(a+(b-a)/2);
+  }
+  return roots;
+}
 }  // namespace
 
 void SearchConfig::validate() const {
+  for (double v:{max_horizontal_vel,max_vertical_vel,max_horizontal_acc,max_vertical_acc})
+    if (!std::isfinite(v) || v<0) throw std::invalid_argument("optional dynamics limits must be finite and nonnegative");
   for (double v : {max_tau, init_max_tau, max_vel, max_acc, w_time, horizon, lambda_heu,
                    resolution, time_resolution, safe_distance, voxel_size, collision_step, search_budget})
     if (!std::isfinite(v) || v <= 0) throw std::invalid_argument("search parameters must be finite and positive");
@@ -94,17 +127,133 @@ bool KinodynamicAstar::setKdtree(const pcl::PointCloud<pcl::PointXYZ>& input) {
   ++cloud_input_num_; map_ready_=true;
   return true;
 }
+bool KinodynamicAstar::setLatestObservation(const pcl::PointCloud<pcl::PointXYZ>& input) {
+  clearMap();
+  return setKdtree(input);
+}
+// Project onto the closed line segment, including degenerate start=goal and both endpoints.
+int KinodynamicAstar::checkLine(const Eigen::Vector3d& start, const Eigen::Vector3d& goal) {
+  if (!inBounds(start) || !inBounds(goal)) return INVALID_INPUT;
+  if (!map_ready_) return NO_MAP;
+  const Vector3d delta=goal-start;
+  const double length2=delta.squaredNorm(), radius2=config_.safe_distance*config_.safe_distance;
+  for (const auto& cloud:clouds_) for (const auto& q:*cloud) {
+    const Vector3d point(q.x,q.y,q.z);
+    const double t=length2==0 ? 0 : std::clamp((point-start).dot(delta)/length2,0.0,1.0);
+    if ((point-start-t*delta).squaredNorm()<radius2) return NO_PATH;
+  }
+  return REACH_END;
+}
+bool KinodynamicAstar::velocityAllowed(const Vector3d& v) const {
+  return v.allFinite() && v.cwiseAbs().maxCoeff()<=max_vel_+kDerivativeLimitSlack &&
+      (config_.max_horizontal_vel==0 || v.head<2>().norm()<=config_.max_horizontal_vel+kDerivativeLimitSlack) &&
+      (config_.max_vertical_vel==0 || std::abs(v.z())<=config_.max_vertical_vel+kDerivativeLimitSlack);
+}
+bool KinodynamicAstar::accelerationAllowed(const Vector3d& a) const {
+  return a.allFinite() && a.cwiseAbs().maxCoeff()<=max_acc_+kDerivativeLimitSlack &&
+      (config_.max_horizontal_acc==0 || a.head<2>().norm()<=config_.max_horizontal_acc+kDerivativeLimitSlack) &&
+      (config_.max_vertical_acc==0 || std::abs(a.z())<=config_.max_vertical_acc+kDerivativeLimitSlack);
+}
+// Validate the remaining curve in-place algebraically, preserving the original time parametrization.
+int KinodynamicAstar::validateTrajectory(const std::vector<TrajectorySegment>& segments,
+                                         double elapsed, const Vector3d& goal) {
+  if (segments.empty() || !std::isfinite(elapsed) || elapsed<0 || !inBounds(goal)) return INVALID_INPUT;
+  double total=0;
+  Vector3d previous_position,previous_velocity; bool first=true;
+  for (const auto& s:segments) {
+    if (!std::isfinite(s.duration) || s.duration<=0 || !s.coefficients.allFinite()) return INVALID_INPUT;
+    const auto& c=s.coefficients; const double t=s.duration;
+    if (!first && ((c.col(0)-previous_position).norm()>1e-6 || (c.col(1)-previous_velocity).norm()>1e-6))
+      return INVALID_INPUT;
+    previous_position=c.col(0)+c.col(1)*t+c.col(2)*t*t+c.col(3)*t*t*t;
+    previous_velocity=c.col(1)+2*c.col(2)*t+3*c.col(3)*t*t;
+    if (!previous_position.allFinite() || !previous_velocity.allFinite()) return INVALID_INPUT;
+    first=false;
+    total+=s.duration;
+    if (!std::isfinite(total) || total>3600) return INVALID_INPUT;
+  }
+  if (elapsed>total) return INVALID_INPUT;
+  const auto& last=segments.back(); const auto& end=last.coefficients; const double t=last.duration;
+  if ((end.col(0)+end.col(1)*t+end.col(2)*t*t+end.col(3)*t*t*t-goal).norm()>1e-6) return INVALID_INPUT;
+  if (!map_ready_) return NO_MAP;
+  deadline_=std::chrono::steady_clock::now()+std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      std::chrono::duration<double>(config_.search_budget));
+  double offset=0;
+  for (const auto& s:segments) {
+    const double local=std::clamp(elapsed-offset,0.0,s.duration);
+    offset+=s.duration;
+    if (local==s.duration && offset<total) continue;
+    auto c=s.coefficients;
+    c.col(0)=s.coefficients.col(0)+s.coefficients.col(1)*local+s.coefficients.col(2)*local*local+s.coefficients.col(3)*local*local*local;
+    c.col(1)=s.coefficients.col(1)+2*s.coefficients.col(2)*local+3*s.coefficients.col(3)*local*local;
+    c.col(2)=s.coefficients.col(2)+3*s.coefficients.col(3)*local;
+    const double remaining=s.duration-local;
+    for (int axis=0;axis<3;++axis) {
+      auto times=rootsInInterval({c(axis,1),2*c(axis,2),3*c(axis,3)},0,remaining);
+      times.push_back(0); times.push_back(remaining);
+      for (double time:times) {
+        const double value=c(axis,0)+c(axis,1)*time+c(axis,2)*time*time+c(axis,3)*time*time*time;
+        if (value<config_.lower(axis) || value>config_.upper(axis)) return INVALID_INPUT;
+      }
+    }
+    if (!curveSafe(c,remaining)) {
+      return std::chrono::steady_clock::now()>=deadline_ ? TIMEOUT : NO_PATH;
+    }
+  }
+  return REACH_END;
+}
+// Exact minimum of squared distance to each nearby centroid on normalized time u in [0,1].
+// The broad-phase radius encloses the entire curve; its rounding padding does not alter clearance.
+bool KinodynamicAstar::curveSafe(const Eigen::Matrix<double,3,4>& coefficients, double duration) {
+  Eigen::Matrix<double,3,4> c=coefficients;
+  for (int i=1;i<4;++i) c.col(i)*=std::pow(duration,i);
+  if (!c.allFinite()) return false;
+  const Vector3d centre=c.col(0);
+  const double bound=c.col(1).norm()+c.col(2).norm()+c.col(3).norm()+config_.safe_distance;
+  if (!std::isfinite(bound)) return false;
+  const pcl::PointXYZ query(centre.x(),centre.y(),centre.z());
+  const double rounding=(centre-Vector3d(query.x,query.y,query.z)).norm()+1e-6*(1+bound);
+  const double radius2=config_.safe_distance*config_.safe_distance;
+  std::vector<int> indices; std::vector<float> distances;
+  for (size_t bank=0;bank<2;++bank) {
+    if (clouds_[bank]->empty()) continue;
+    trees_[bank].radiusSearch(query,bound+rounding,indices,distances);
+    for (int index:indices) {
+      if (std::chrono::steady_clock::now()>=deadline_) return false;
+      const auto& q=(*clouds_[bank])[index];
+      auto relative=c; relative.col(0)-=Vector3d(q.x,q.y,q.z);
+      std::vector<double> derivative(6,0);
+      for (int i=0;i<4;++i) for (int j=1;j<4;++j)
+        derivative[i+j-1]+=2*j*relative.col(i).dot(relative.col(j));
+      for (double value:derivative) if (!std::isfinite(value)) return false;
+      auto candidates=rootsInInterval(derivative,0,1);
+      candidates.push_back(0); candidates.push_back(1);
+      for (double t:candidates) {
+        const Vector3d p=relative.col(0)+relative.col(1)*t+relative.col(2)*t*t+relative.col(3)*t*t*t;
+        if (p.squaredNorm()<radius2) return false;
+      }
+    }
+  }
+  return true;
+}
 bool KinodynamicAstar::inBounds(const Eigen::Vector3d& p) const {
   return p.allFinite() && (p.array() >= config_.lower.array()).all() && (p.array() <= config_.upper.array()).all();
 }
 bool KinodynamicAstar::isSafe(double x, double y, double z) {
   if (!map_ready_ || !inBounds({x,y,z})) return false;
-  // Match upstream SAFE_DIST: compare against stored voxel centroids, without extra inflation.
-  const double radius = config_.safe_distance;
+  // PCL quantizes the query and distances to float. Use it only for conservative candidates;
+  // every candidate's strict clearance is evaluated from the original double query instead.
+  const Vector3d position(x,y,z);
+  const pcl::PointXYZ query(x,y,z);
+  const double radius=config_.safe_distance, radius2=radius*radius;
+  const double rounding=(position-Vector3d(query.x,query.y,query.z)).norm()+1e-6*(1+radius);
   for (std::size_t i=0; i<2; ++i) {
     if (clouds_[i]->empty()) continue;
-    if (trees_[i].nearestKSearch(pcl::PointXYZ(x,y,z), 1, nearest_indices_, nearest_distances_) != 1 ||
-        nearest_distances_[0] < radius*radius) return false;
+    trees_[i].radiusSearch(query,radius+rounding,query_indices_,query_distances_);
+    for (int index:query_indices_) {
+      const auto& point=(*clouds_[i])[index];
+      if ((position-Vector3d(point.x,point.y,point.z)).squaredNorm()<radius2) return false;
+    }
   }
   return true;
 }
@@ -122,8 +271,14 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
   if (!start_pt.allFinite() || !start_v.allFinite() || !start_a.allFinite() ||
       !end_pt.allFinite() || !end_v.allFinite() || !std::isfinite(time_start) ||
       !inBounds(start_pt) || !inBounds(end_pt) ||
-      start_v.cwiseAbs().maxCoeff() > max_vel_ || end_v.cwiseAbs().maxCoeff() > max_vel_ ||
-      start_a.cwiseAbs().maxCoeff() > max_acc_) return INVALID_INPUT;
+      start_v.cwiseAbs().maxCoeff()>max_vel_ || end_v.cwiseAbs().maxCoeff()>max_vel_ ||
+      start_a.cwiseAbs().maxCoeff()>max_acc_ ||
+      (config_.max_horizontal_vel>0 && (start_v.head<2>().norm()>config_.max_horizontal_vel || end_v.head<2>().norm()>config_.max_horizontal_vel)) ||
+      (config_.max_vertical_vel>0 && (std::abs(start_v.z())>config_.max_vertical_vel || std::abs(end_v.z())>config_.max_vertical_vel)) ||
+      (config_.max_horizontal_acc>0 && start_a.head<2>().norm()>config_.max_horizontal_acc) ||
+      (config_.max_vertical_acc>0 && std::abs(start_a.z())>config_.max_vertical_acc) ||
+      !velocityAllowed(start_v) || !velocityAllowed(end_v) ||
+      !accelerationAllowed(start_a)) return INVALID_INPUT;
   if (!map_ready_) return NO_MAP;
   if (!isSafe(start_pt.x(), start_pt.y(), start_pt.z()) ||
       !isSafe(end_pt.x(), end_pt.y(), end_pt.z())) return NO_PATH;
@@ -243,10 +398,13 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
     }
     else
     {
-      const std::array<double, 5> accelerations{-max_acc_, -max_acc_ / 2, 0, max_acc_ / 2, max_acc_};
+      const double horizontal=config_.max_horizontal_acc>0 ? std::min(max_acc_,config_.max_horizontal_acc) : max_acc_;
+      const double vertical=config_.max_vertical_acc>0 ? std::min(max_acc_,config_.max_vertical_acc) : max_acc_;
+      const std::array<double, 5> accelerations{-horizontal,-horizontal/2,0,horizontal/2,horizontal};
+      const std::array<double, 5> vertical_accelerations{-vertical,-vertical/2,0,vertical/2,vertical};
       for (double ax : accelerations)
         for (double ay : accelerations)
-          for (double az : accelerations)
+          for (double az : vertical_accelerations)
           {
             um << ax, ay, az;
             inputs.push_back(um);
@@ -258,7 +416,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
       {
         um = inputs[i];
         if (std::chrono::steady_clock::now() >= deadline_) { reset(); return TIMEOUT; }
-        if (!um.allFinite() || um.cwiseAbs().maxCoeff() > max_acc_) continue;
+        if (!accelerationAllowed(um)) continue;
         double tau = durations[j];
         stateTransit(cur_state, pro_state, um, tau);
         pro_t = cur_node->time + tau;
@@ -292,7 +450,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
             continue;
         }
         Eigen::Vector3d pro_v = pro_state.tail(3);
-        if (fabs(pro_v(0)) > max_vel_ || fabs(pro_v(1)) > max_vel_ || fabs(pro_v(2)) > max_vel_)
+        if (!velocityAllowed(pro_v))
         {
             continue;
         }
@@ -302,35 +460,10 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
         {
             continue;
         }
-        Eigen::Vector3d pos;
-        Eigen::Matrix<double, 6, 1> xt;
-        bool is_occ = false;
-        // Speed bounds give a spatial sampling bound even on returning/curved primitives.
-        const int dyn_checknum = std::max(1, static_cast<int>(std::ceil(
-            tau * std::sqrt(3.0) * max_vel_ / config_.collision_step)));
-        for (int k = 1; k <= dyn_checknum; ++k)
-        {
-          double dt = tau * double(k) / double(dyn_checknum);
-
-          stateTransit(cur_state, xt, um, dt);
-
-          pos = xt.head(3);
-          if (!inBounds(pos))
-          {
-            is_occ = true;
-            break;
-          }
-
-          if (!isSafe(pos(0),pos(1),pos(2))) {
-            is_occ = true;
-            break;
-          }
-
-        }
-        if (is_occ)
-        {
-            continue;
-        }
+        Eigen::Matrix<double,3,4> primitive=Eigen::Matrix<double,3,4>::Zero();
+        primitive.col(0)=cur_state.head<3>(); primitive.col(1)=cur_state.tail<3>();
+        primitive.col(2)=um/2;
+        if (!curveSafe(primitive,tau)) continue;
 
         // Accumulated control-effort/time cost plus the weighted upstream terminal-cost heuristic.
         double time_to_goal, tmp_g_score, tmp_f_score;
@@ -446,6 +579,11 @@ double KinodynamicAstar::estimateHeuristic(Eigen::VectorXd x1, Eigen::VectorXd x
 
   double v_max = max_vel_ * kHeuristicVelocityFraction;
   double t_bar = std::max(kMinHeuristicTimeSeconds, (x1.head(3) - x2.head(3)).lpNorm<Infinity>() / v_max);
+  // Respect optional slower vertical/horizontal limits when choosing terminal-cubic durations.
+  if (config_.max_horizontal_vel>0)
+    t_bar=std::max(t_bar,dp.head<2>().norm()/(config_.max_horizontal_vel*kHeuristicVelocityFraction));
+  if (config_.max_vertical_vel>0)
+    t_bar=std::max(t_bar,std::abs(dp.z())/(config_.max_vertical_vel*kHeuristicVelocityFraction));
   ts.push_back(t_bar);
 
   double cost = kInitialHeuristicCost;
@@ -510,17 +648,24 @@ bool KinodynamicAstar::computeShotTraj(Eigen::VectorXd state1, Eigen::VectorXd s
       if (t >= 0 && t <= t_d && (position(t) < config_.lower(axis) || position(t) > config_.upper(axis)))
         return false;
   }
+  if (!accelerationAllowed(2*b) || !accelerationAllowed(2*b+6*a*t_d)) return false;
+  // Horizontal velocity norm squared is quartic; inspect its cubic derivative roots.
+  std::vector<double> speed_derivative(4,0);
+  const std::array<Eigen::Vector2d,3> v{c.head<2>(),(2*b*t_d).head<2>(),(3*a*t_d*t_d).head<2>()};
+  for (int i=0;i<3;++i) for (int j=1;j<3;++j) speed_derivative[i+j-1]+=2*j*v[i].dot(v[j]);
+  auto speed_times=rootsInInterval(speed_derivative,0,1);
+  speed_times.push_back(0); speed_times.push_back(1);
+  for (double u:speed_times) if (!velocityAllowed(c+2*b*(u*t_d)+3*a*(u*t_d)*(u*t_d))) return false;
+  // Vertical velocity extrema are independent of the horizontal norm extrema.
+  if (std::abs(a.z())>kPolynomialZeroTolerance) {
+    const double t=-b.z()/(3*a.z());
+    if (t>0 && t<t_d && !velocityAllowed(c+2*b*t+3*a*t*t)) return false;
+  }
   const double check_count = std::ceil(t_d * std::sqrt(3.0) * max_vel_ / config_.collision_step);
   // A heuristic shot can be much longer than a configured primitive; avoid undefined int casts.
   if (!coef.allFinite() || !std::isfinite(check_count) || check_count >= std::numeric_limits<int>::max())
     return false;
-  const int checks = std::max(1, static_cast<int>(check_count));
-  for (int i = 0; i <= checks; ++i) {
-    if (std::chrono::steady_clock::now() >= deadline_) return false;
-    const double t = t_d * i / checks;
-    const Vector3d p = d + c*t + b*t*t + a*t*t*t;
-    if (!isSafe(p.x(), p.y(), p.z())) return false;
-  }
+  if (!curveSafe(coef,t_d)) return false;
   coef_shot_ = coef;
   t_shot_ = t_d;
   is_shot_succ_ = true;

@@ -2,7 +2,7 @@
 <!-- Standalone HKU-MARS search port; no ROS runtime, flight-controller or sensor-driver dependency. -->
 <package format="3">
   <name>path_searching</name>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
   <description>Kinodynamic A* and two-bank accumulated point-cloud collision map.</description>
   <maintainer email="LostPatrol@users.noreply.github.com">LostPatrol</maintainer>
   <author email="kongfz@connect.hku.hk">kongfz (upstream)</author>

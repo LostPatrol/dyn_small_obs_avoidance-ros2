@@ -12,6 +12,10 @@ from registered point clouds and odometry.
 
 The planner publishes polynomial trajectories, sampled position/velocity/acceleration and a
 path for visualization. It runs independently of SLAM, sensor drivers and flight controllers.
+External executors can use `PlanMotion` to plan from actual request position/velocity, check a
+closed straight segment, or validate the remaining polynomial curve against the current map.
+See the [service contract](docs/USAGE.md#外部执行器服务契约) for process identity, freshness,
+optional dynamics limits and controlled observation-map snapshots.
 
 Original work: *Avoiding dynamic small obstacles with onboard sensing and computing on aerial robots*.
 [Paper](https://arxiv.org/abs/2103.00406) · [Video](https://youtu.be/pBHbQ_J1Qhc)

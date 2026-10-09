@@ -1,0 +1,18 @@
+# World-frame, actual execution-state planning and exact current-map validation.
+uint8 PLAN=1
+uint8 CHECK_LINE=2
+uint8 VALIDATE_TRAJECTORY=3
+std_msgs/Header header
+uint8 mode
+geometry_msgs/Point start
+geometry_msgs/Vector3 velocity
+geometry_msgs/Point goal
+# VALIDATE_TRAJECTORY only: original ordered curves and elapsed seconds from their start.
+path_planning/PolynomialSegment[] segments
+float64 trajectory_elapsed
+---
+# CHECK_LINE/VALIDATE_TRAJECTORY return REACH_END when clear, NO_PATH when blocked;
+# every other status is unknown. They return no trajectory and never run A*.
+path_planning/PlanResult result
+# Unique process identity; changes on planner restart independently of sequence reset.
+string planner_session

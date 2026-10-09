@@ -7,6 +7,7 @@ path_planning:
     planning_frame: camera_init
     # Hz, finite and positive (at most 1000). Timer frequency is not a hard real-time guarantee.
     planning_rate: 10.0
+    service_only: false  # true disables timer planning; requests use their own actual world p/v
     # Seconds, >0: maximum steady-clock reception age for cloud and odometry.
     # In ros mode the same limit also applies to header age; source time may lead by at most 0.05 s.
     input_timeout: 0.5
@@ -16,6 +17,9 @@ path_planning:
     # Metres, >=0: remove points strictly inside this 3D radius before map accumulation; 0 disables.
     # This is a sensor blind zone, not body classification: real obstacles inside it are also removed.
     cloud.blind_radius: 0.0
+    # latest_observation accepts a caller-maintained, coverage-validated cumulative map snapshot.
+    # Never feed raw single-frame missing points as obstacle disappearance. Empty remains unknown.
+    cloud.map_mode: dual_tree
     # Sensor centre relative to the odometry pose origin, expressed in child-frame axes (metres).
     cloud.blind_origin_offset: [0.0, 0.0, 0.0]
     # Seconds, >0: nearest valid odometry/cloud source timestamp difference allowed for filtering.
@@ -42,6 +46,12 @@ path_planning:
     # m/s and m/s², >0, per axis. Euclidean limits can be sqrt(3) times these values.
     search.max_vel: 2.0
     search.max_acc: 2.0
+    # Optional horizontal Euclidean / vertical absolute limits; 0 disables the additional limit.
+    # Vehicle adapter configuration uses 1.0 / 0.2 m/s and 0.35 / 0.15 m/s² respectively.
+    search.max_horizontal_vel: 0.0
+    search.max_vertical_vel: 0.0
+    search.max_horizontal_acc: 0.0
+    search.max_vertical_acc: 0.0
     # Positive time penalty in integral(||acceleration||² + w_time) dt; larger favors shorter durations.
     search.w_time: 10.0
     # Meters, >0: displacement from start that permits a partial REACH_HORIZON result, not path length.
@@ -57,8 +67,8 @@ path_planning:
     search.safe_distance: 0.45
     # Meters, >0: voxel edge for accumulated clouds; matches ROS1's 0.1 m leaf size.
     search.voxel_size: 0.1
-    # Meters, >0 and <=safe_distance: maximum travel interval between collision checks.
-    # Sampling density is independent of the radius; effective radius = safe_distance (0.45 m).
+    # Legacy compatibility setting, >0 and <=safe_distance; retained for configuration/ABI.
+    # Continuous polynomial collision checks now use stationary-distance roots, not sampling.
     search.collision_step: 0.05
     # Seconds, (0,60]: cooperative search budget, excluding map building and result serialization.
     # A difficult search can exceed the nominal 100 ms timer period; 10 Hz output is not guaranteed.
