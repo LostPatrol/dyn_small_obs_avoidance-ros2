@@ -109,6 +109,7 @@ def test_planner_process(tmp_path, blind_radius):
             odom.pose.pose.orientation.w = math.cos(yaw/2)
             odom.twist.twist.linear.x, odom.twist.twist.linear.y, odom.twist.twist.linear.z = velocity
             odoms.publish(odom)
+            return cloud.header.stamp
 
         def target(x=4.0, y=0.0):
             goal = PoseStamped()
@@ -170,10 +171,12 @@ def test_planner_process(tmp_path, blind_radius):
                 # Allow source time to catch up to the deliberately future-stamped frame.
                 time.sleep(.35)
                 wait_for(lambda r: r.status == r.REACH_END, feed)
-                feed(delayed_pair=True)
+                delayed_stamp = feed(delayed_pair=True)
+                # Verify the exact matched pair, independent of when this test consumes DDS output.
+                # The source stamp can cease to be "future" while reception age remains <0.4s.
+                time.sleep(.16)
                 delayed = wait_for(lambda r: r.status == r.REACH_END and
-                                   r.cloud_stamp.sec*10**9+r.cloud_stamp.nanosec >
-                                   node.get_clock().now().nanoseconds)
+                                   r.cloud_stamp == delayed_stamp and r.odometry_stamp == delayed_stamp)
                 assert delayed.segments
                 time.sleep(.25)
                 wait_for(lambda r: r.status == r.REACH_END, feed)

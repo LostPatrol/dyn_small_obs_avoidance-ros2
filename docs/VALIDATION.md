@@ -26,6 +26,13 @@ elapsed=0.9时仅剩余后缀clear，覆盖距离平方五次导数驻点路径�
 以及float距离并列但double查询实际在一侧界内的双候选案例；不能只重算单nearest点。
 端点修复后的受影响回归重新运行：Release与ASan/UBSan/leak各24核心+1服务DDS均通过；
 首次完整43项基线与该受影响范围分别记录，不把首次计数改写为最终44项全量重跑。
+主任务随后在开发机完整colcon重新验证44/44通过。refresh ARM64原生复验发现盲区DDS用例
+在delayed pair后强制`cloud_stamp>客户端当前now`，future源时标只领先0.2s、feed已等待0.06s，
+剩余消费窗口至多0.14s；调度较慢时窗口失效，即使匹配与receive年龄仍合法，测试也永远不能成功。
+测试现要求成功结果的cloud/odometry stamp均精确等于投递的delayed pair，并加入0.16s消费延迟
+覆盖源时标已不在future但接收年龄仍<0.4s的情况。生产blind_wait、匹配容差、input_timeout不变。
+修复后开发机全部5项ros_io通过，修复的盲区用例独立Release及ASan/UBSan/leak均通过；
+refresh ARM64由主任务修复后原生完整复验44/44通过（含CTest包装项）；未解锁或起飞实机。
 核心曲线碰撞改用距离平方导数实根隔离，检查连续曲线到附近体素质心的最小值，
 没有增加补偿半径或放宽0.45m阈值；`collision_step`保留兼容配置，已不决定碰撞采样精度。
 附加低动力学绕杆用例验证水平v≤1、竖直v≤0.2、水平a≤0.35、竖直a≤0.15，
