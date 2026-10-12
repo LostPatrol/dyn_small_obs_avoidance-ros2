@@ -287,7 +287,8 @@ def test_default_interval_refreshes_without_cloud_or_index_advance(planner):
                (refreshed.header.stamp.nanosec-initial.header.stamp.nanosec)*1e-9)
     assert 1.0 <= elapsed < 1.6
     assert refreshed.goal_revision == initial.goal_revision
-    assert len(p.paths) >= 2
+    # Result and Path travel on separate DDS topics; delivery order is not guaranteed.
+    p.wait(lambda: len(p.paths) >= 2)
 
 
 @pytest.mark.parametrize('planner', [{'replan_interval': 60.}], indirect=True)
