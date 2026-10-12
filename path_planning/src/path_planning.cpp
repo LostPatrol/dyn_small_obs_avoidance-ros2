@@ -1,4 +1,4 @@
-// GPL-3.0: Jazzy wrapper with upstream event-driven replanning; motion-service search is unchanged.
+// GPL-3.0: Jazzy wrapper with event, elapsed-time and displacement replanning.
 #include "output_contract.hpp"
 #include "motion_adapter.hpp"
 #include <path_searching/kinodynamic_astar.h>
@@ -56,6 +56,8 @@ class Planner : public rclcpp::Node {
     core_ = std::make_unique<KinodynamicAstar>(c);
     frame_=declare_parameter("planning_frame", "camera_init");
     rate_=declare_parameter("planning_rate",10.0); timeout_=declare_parameter("input_timeout",0.5);
+    replan_interval_=declare_parameter("replan_interval",1.0);
+    replan_distance_=declare_parameter("replan_distance",1.0);
     step_=declare_parameter("sample_step",0.02); stamp_clock_=declare_parameter("stamp_clock","ros");
     max_samples_=declare_parameter("output.max_samples",10000);
     max_duration_=declare_parameter("output.max_duration",60.0);
@@ -80,6 +82,7 @@ class Planner : public rclcpp::Node {
     if (frame_.empty() || !positive(rate_) || rate_>kMaxPlanningRateHz || !positive(timeout_) || !positive(step_) ||
         max_samples_<1 || max_samples_>kMaxOutputSamples || !positive(max_duration_) ||
         max_duration_>kMaxOutputDuration || !positive(build_budget_) ||
+        !positive(replan_interval_) || !positive(replan_distance_) ||
         (stamp_clock_!="ros" && stamp_clock_!="receive")) throw std::invalid_argument("invalid wrapper parameters");
     // Best-effort subscribers match either sensor reliability policy. Results/goals are reliable
     // and volatile: a newly connected consumer must wait for a fresh result rather than a latched path.
@@ -98,13 +101,15 @@ class Planner : public rclcpp::Node {
     motion_service_=create_service<path_planning::srv::PlanMotion>("plan_motion",
       [this](const path_planning::srv::PlanMotion::Request::SharedPtr request,
              path_planning::srv::PlanMotion::Response::SharedPtr response) { motion(*request,*response); });
-    // Retain input-loss diagnostics, but never repeat a search from the timer.
+    // Reuse the existing timer for elapsed-time checks and input-loss diagnostics.
     if (!service_only_) timer_=create_wall_timer(std::chrono::duration<double>(1/rate_),[this]{
       processPendingCloud();
       if (goal_status_ || odom_status_ || cloud_status_ || !fresh(cloud_received_,cloud_stamp_) ||
           !fresh(odom_received_,odom_stamp_)) executePlan(position_,velocity_,goal_,false);
+      else replan(false);
     });
-    RCLCPP_INFO(get_logger(),"Planner ready: frame=%s, event-driven standalone, clock=%s",frame_.c_str(),stamp_clock_.c_str());
+    RCLCPP_INFO(get_logger(),"Planner ready: frame=%s, replan_interval=%.3fs, replan_distance=%.3fm, clock=%s",
+        frame_.c_str(),replan_interval_,replan_distance_,stamp_clock_.c_str());
   }
 
  private:
@@ -250,6 +255,7 @@ class Planner : public rclcpp::Node {
       if (blind_poses_.size()>kBlindPoseHistorySize) blind_poses_.pop_front();
     }
     processPendingCloud();
+    if (!service_only_) replan(false);
   }
   // Goals persist until replaced; only position/frame are consumed, not orientation or timestamp.
   // Every received goal advances the revision, including repeated coordinates and invalid requests.
@@ -260,10 +266,17 @@ class Planner : public rclcpp::Node {
     goal_status_=goal_.allFinite()?0:Result::INVALID_INPUT;
     if (!service_only_ && !goal_status_ && !odom_status_) plan();
   }
-  // Upstream cloud trigger: inspect the WHOLE old path at stride 40, not just its remainder.
-  // Keep a failed replan pending; only successful publication clears the flag.
-  void replan() {
-    if (goal_status_ || (goal_-position_).norm()<0.3 || standalone_path_.empty() || odom_status_) return;
+  // Time/distance refreshes use actual odometry; clouds also inspect the whole old path.
+  // Keep a failed obstacle replan pending; only successful publication clears the flag.
+  void replan(bool check_path=true) {
+    if (goal_status_ || odom_status_ || cloud_status_ || (goal_-position_).norm()<0.3 ||
+        !fresh(cloud_received_,cloud_stamp_) || !fresh(odom_received_,odom_stamp_)) return;
+    if (std::chrono::duration<double>(Clock::now()-last_replan_time_).count()>=replan_interval_ ||
+        (position_-last_replan_position_).norm()>=replan_distance_) {
+      plan(true);
+      return;
+    }
+    if (!check_path || standalone_path_.empty()) return;
     for (size_t i=0;i<standalone_path_.size();i+=40) {
       if (replan_flag_) break;
       const auto& p=standalone_path_[i];
@@ -271,11 +284,12 @@ class Planner : public rclcpp::Node {
     }
     if (replan_flag_) plan();
   }
-  // Preserve upstream execution-index throttling and the old-path initial state when supplied.
+  // New refresh triggers bypass index throttling and start from the actual vehicle state.
+  // Other events preserve upstream execution-index throttling and the old-path initial state.
   // Actual vector length guards the upstream N+1/index accesses that otherwise read out of bounds.
-  void plan() {
+  void plan(bool refresh=false) {
     Vector start=position_,velocity=velocity_;
-    if (!first_plan_ && replan_index_!=-1) {
+    if (!refresh && !first_plan_ && replan_index_!=-1) {
       if (std::abs(static_cast<long double>(last_replan_index_)-replan_index_)<10) return;
       const auto n=static_cast<int64_t>(standalone_path_.size());
       if (replan_index_<0 || replan_index_>=n) return;
@@ -292,6 +306,8 @@ class Planner : public rclcpp::Node {
         velocity=(standalone_path_[used+2]-standalone_path_[used-2])/0.04;
       }
     }
+    // Measure from each actual attempt, including failed searches, rather than timer callbacks.
+    last_replan_time_=Clock::now(); last_replan_position_=position_;
     const auto result=executePlan(start,velocity,goal_,false);
     if (result.status==Result::REACH_END || result.status==Result::REACH_HORIZON) {
       // ROS1's execution-index/check buffer is sampled at 0.01 s; public output keeps sample_step.
@@ -449,6 +465,9 @@ class Planner : public rclcpp::Node {
   std::string frame_,stamp_clock_,map_mode_,planner_session_,cloud_detail_="no cloud received";
   bool service_only_=false;
   bool first_plan_=true,replan_flag_=false;
+  double replan_interval_,replan_distance_;  // Seconds and metres between standalone attempts.
+  Clock::time_point last_replan_time_{};
+  Vector last_replan_position_=Vector::Zero();  // Actual odometry at the last planning attempt.
   int64_t replan_index_=-1,last_replan_index_=-1;
   std::vector<Vector> standalone_path_;  // Last successful ROS1 0.01-s check/index buffer.
   double rate_,timeout_,step_,max_duration_,build_budget_; int max_samples_; bool body_twist_;

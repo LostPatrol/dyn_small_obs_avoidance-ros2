@@ -1,4 +1,4 @@
-"""Real DDS checks for ROS1 goal/cloud event planning and persistent failed replans."""
+"""Real DDS checks for event, elapsed-time and displacement replanning without flight hardware."""
 import math
 import os
 import signal
@@ -65,8 +65,8 @@ class PlannerProbe:
             'node_log': self.log_path.read_text(),
         }
 
-    def observe(self, points=((-20., -20., 1.),), position=(0., 0., 1.)):
-        """Refresh actual state before the cloud event; its echo proves map ingestion occurred."""
+    def odometry(self, position=(0., 0., 1.)):
+        """Publish actual state without a cloud event to isolate displacement triggers."""
         odom = Odometry()
         odom.header = Header(frame_id='map', stamp=self.node.get_clock().now().to_msg())
         odom.child_frame_id = 'body'
@@ -74,6 +74,10 @@ class PlannerProbe:
         odom.pose.pose.orientation.w = 1.
         self.odoms.publish(odom)
         self.spin(.03)
+
+    def observe(self, points=((-20., -20., 1.),), position=(0., 0., 1.)):
+        """Refresh actual state before the cloud event; its echo proves map ingestion occurred."""
+        self.odometry(position)
         header = Header(frame_id='map', stamp=self.node.get_clock().now().to_msg())
         self.clouds.publish(create_cloud_xyz32(header, points))
         self.wait(lambda: any(c.header.stamp == header.stamp for c in self.filtered))
@@ -107,10 +111,13 @@ class PlannerProbe:
 
 
 @pytest.fixture
-def planner(tmp_path):
+def planner(tmp_path, request):
     """Run the installed executable, with two short-lived map banks for deterministic recovery."""
     exe = get_package_prefix('path_planning') + '/lib/path_planning/path_planning_node'
     log_path = tmp_path / 'replanning.log'
+    # Legacy event tests isolate their original triggers; new tests select their own thresholds.
+    parameters = getattr(request, 'param', {'replan_interval': 60., 'replan_distance': 100.}) or {}
+    arguments = [arg for name, value in parameters.items() for arg in ('-p', f'{name}:={value}')]
     with log_path.open('w') as log:
         proc = subprocess.Popen([
             exe, '--ros-args', '-p', 'planning_frame:=map', '-p', 'input_timeout:=2.0',
@@ -120,7 +127,7 @@ def planner(tmp_path):
             '-p', 'search.search_budget:=0.3',
             '-p', 'search.voxel_size:=0.1', '-p', 'sample_step:=0.02',
             '-r', 'time_index:=/demo_node/trajectory_time_index',
-        ], stdout=log, stderr=log)
+        ] + arguments, stdout=log, stderr=log)
         rclpy.init()
         probe = None
         try:
@@ -261,3 +268,73 @@ def test_external_index_throttle_and_invalid_indices(planner):
         p.goal()
         p.quiet(observations=1)
         assert len(p.results) == first and len(p.paths) == path_count
+
+
+@pytest.mark.parametrize('planner', [None], indirect=True)
+def test_default_interval_refreshes_without_cloud_or_index_advance(planner):
+    """Default 1 s refresh repeats a safe plan even with a stationary execution index."""
+    p = planner
+    p.observe()
+    first = len(p.results)
+    p.goal()
+    initial = p.outcome(first, PlanResult.REACH_END)
+    p.index(0)
+    first = len(p.results)
+    p.spin(.35)
+    assert len(p.results) == first
+    refreshed = p.outcome(first, PlanResult.REACH_END)
+    elapsed = (refreshed.header.stamp.sec-initial.header.stamp.sec +
+               (refreshed.header.stamp.nanosec-initial.header.stamp.nanosec)*1e-9)
+    assert 1.0 <= elapsed < 1.6
+    assert refreshed.goal_revision == initial.goal_revision
+    assert len(p.paths) >= 2
+
+
+@pytest.mark.parametrize('planner', [{'replan_interval': 60.}], indirect=True)
+def test_default_distance_uses_last_attempt_and_actual_odometry(planner):
+    """Default 1 m trigger includes equality and resets its baseline after each attempt."""
+    p = planner
+    p.observe()
+    first = len(p.results)
+    p.goal()
+    p.outcome(first, PlanResult.REACH_END)
+    p.index(0)
+    first = len(p.results)
+    p.odometry((.75, 0., 1.))
+    p.spin(.15)
+    assert len(p.results) == first
+    p.odometry((1., 0., 1.))
+    moved = p.outcome(first, PlanResult.REACH_END)
+    start = moved.trajectory.points[0].transforms[0].translation
+    assert (start.x, start.y, start.z) == pytest.approx((1., 0., 1.))
+    first = len(p.results)
+    p.odometry((1.75, 0., 1.))
+    p.spin(.15)
+    assert len(p.results) == first
+    p.odometry((2., 0., 1.))
+    moved = p.outcome(first, PlanResult.REACH_END)
+    assert moved.trajectory.points[0].transforms[0].translation.x == pytest.approx(2.)
+
+
+@pytest.mark.parametrize('planner', [{'replan_interval': 1.5, 'replan_distance': 100.}], indirect=True)
+def test_elapsed_refresh_shortens_path_after_obstacle_disappears(planner):
+    """Once both map banks clear, time refresh replaces a still-safe detour with a straight path."""
+    p = planner
+    p.observe()
+    first = len(p.results)
+    p.goal()
+    initial = p.outcome(first, PlanResult.REACH_END)
+    blocker = min(legacy_samples(initial)[::40], key=lambda xyz: abs(xyz[0]-2.))
+    first = len(p.results)
+    p.observe(points=((-20., -20., 1.), blocker))
+    detour = p.outcome(first, PlanResult.REACH_END)
+    assert any(abs(t.transforms[0].translation.y) > .1 or
+               abs(t.transforms[0].translation.z-1.) > .1 for t in detour.trajectory.points)
+    first = len(p.results)
+    p.observe()
+    p.observe()
+    assert len(p.results) == first
+    refreshed = p.outcome(first, PlanResult.REACH_END)
+    assert refreshed.goal_revision == detour.goal_revision
+    assert all(abs(t.transforms[0].translation.y) < 1e-6 and
+               abs(t.transforms[0].translation.z-1.) < 1e-6 for t in refreshed.trajectory.points)

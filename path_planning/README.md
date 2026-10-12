@@ -1,4 +1,4 @@
-<!-- ROS1 standalone replanning and Task38 service adapter; core/field configuration stay authoritative. -->
+<!-- Standalone event/time/distance replanning and Task38 service adapter. -->
 # 规划服务适配
 
 `path_planning_node` 现在额外提供相对命名服务 `plan_motion`（`path_planning/srv/PlanMotion`）。
@@ -6,11 +6,15 @@
 p/v/a，不修改搜索、碰撞检查或动力学参数。请求由控制权威提供，不需要另外发布目标或里程计。
 服务请求时间戳使用 ROS 时间；点云仍按现场 `stamp_clock` 参数校验。
 
-默认 `service_only=false`、`cloud.map_mode=dual_tree`。独立入口恢复 ROS1 事件重规划：
+默认 `service_only=false`、`cloud.map_mode=dual_tree`。独立入口保留 ROS1 事件重规划：
 目标到达且起点已就绪时规划；点云更新后按旧路径每40点检查，不安全才重规划。
 实际起点距目标小于0.3m时跳过点云重规划；失败保留重规划标记和旧路径，成功才清标记。
-初次失败且没有旧路径时不自动重试；目标先于里程计时不由定时器补发规划。
-`planning_rate` 只控制输入失效诊断，不再控制搜索频率。双树累积和现场参数不变。
+此外，距上次规划尝试经过 `replan_interval` 秒（默认1秒），或实际三维位置变化达到
+`replan_distance` 米（默认1米），也会重规划。参数位于 `config/planner.yaml`，修改后重启。
+这两种触发从实际里程计位置/速度规划，不受执行索引节流限制；每次实际尝试（包括失败）
+更新计时和位移基准。输入就绪后也可补规划或重试首次失败。
+`planning_rate` 控制定时检查和输入失效诊断频率（默认10Hz），时间触发有最多一个检查周期的延迟，
+搜索耗时也可能延后触发。双树累积仍保留历史障碍，消失障碍须从地图淘汰后才能缩短路径。
 
 核心普通运动原语保留恒加速度模型，碰撞检查用端点净空余量覆盖弧长上界：
 `Da + Db >= 2 * safe_distance + h * (|va| + |vb|) / 2` 时接受整段，否则查询中点并细分。
@@ -28,7 +32,7 @@ p/v/a，不修改搜索、碰撞检查或动力学参数。请求由控制权威
 绝对索引差小于10的节流及旧路径index+3位置/差分速度；内部检查与索引缓存按0.01s采样。
 不发布索引时从实际里程计状态规划。先固定零初始加速度搜索，仅NO_PATH时再自由加速度搜索。
 保留整个旧路径检查及稀疏步长；只对原版未初始化读取和确定越界保留必要保护。
-`/kino_path` 不周期刷新；新规划或输入失效时才有对应结果，不用“没有新结果”推断规划失败。
+`/kino_path` 仅在规划成功后更新；输入失效时仍会发布结果，不用“没有新结果”推断规划失败。
 
 `CHECK_LINE` 校验完整闭线段，`VALIDATE_TRAJECTORY` 校验尚未执行的曲线部分，两者不运行 A*。
 适配器调用旧核心 `isSafe()`，沿空间按 `search.collision_step` 离散采样，保留严格小于

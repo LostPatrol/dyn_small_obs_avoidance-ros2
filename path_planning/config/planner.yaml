@@ -5,8 +5,12 @@ path_planning:
   ros__parameters:
     # Exact frame_id required on cloud, odometry pose and goal; this node does not perform TF transforms.
     planning_frame: odom
-    # Hz, finite and positive (at most 1000): input-loss diagnostics only; searches are event-driven.
+    # Hz, finite and positive (at most 1000): timer checks for replanning and input-loss diagnostics.
     planning_rate: 10.0
+    # Seconds, >0: replan after this time since the last attempt (1.0 gives nominal 1 Hz).
+    replan_interval: 1.0
+    # Metres, >0: replan when actual 3D position moves at least this far from the last attempt.
+    replan_distance: 1.0
     # Seconds, >0: maximum steady-clock reception age for cloud and odometry.
     # In ros mode the same limit also applies to header age; source time may lead by at most 0.05 s.
     input_timeout: 0.5
