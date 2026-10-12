@@ -19,7 +19,7 @@ path_planning:
     odometry_twist_in_body: true  # nav_msgs/Odometry twist is expressed in child_frame_id
     # Metres, >=0: remove points strictly inside this 3D radius before map accumulation; 0 disables.
     # This is a sensor blind zone, not body classification: real obstacles inside it are also removed.
-    cloud.blind_radius: 0.3
+    cloud.blind_radius: 0.0
     # Sensor centre relative to the odometry pose origin, expressed in child-frame axes (metres).
     cloud.blind_origin_offset: [0.0, 0.0, 0.0]
     # Seconds, >0: nearest valid odometry/cloud source timestamp difference allowed for filtering.

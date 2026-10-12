@@ -253,7 +253,9 @@ ros2 topic echo /kino_path --once
 #### 可选近距离盲区
 
 通用配置 `cloud.blind_radius` 为三维球形半径（米），默认 `0.0` 关闭。
-Odin 入口用启动参数显式覆盖 YAML 中的半径，例如：
+`odin.launch.py` 和 `planner.launch.py` 均按以下优先级读取半径：命令行
+`blind_radius` → YAML 的 `cloud.blind_radius` → 节点默认 `0.0`。
+YAML 默认同样为 `0.0`；省略启动参数时不覆盖 YAML。显式覆盖示例：
 
 ```bash
 ros2 launch path_planning odin.launch.py blind_radius:=0.5

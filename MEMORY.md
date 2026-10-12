@@ -6,11 +6,13 @@
 - 独立入口先init=true、NO_PATH才init=false；内部旧路径检查/执行索引缓存按0.01s采样，公共输出仍由sample_step控制。launch默认将time_index映射到/demo_node/trajectory_time_index：原goal/受阻事件有索引时绝对差<10节流，从旧路径index+3及差分速度规划；新增时间/位移触发及无索引时用实际odom p/v。仅防未初始化读取和确定越界。
 - 普通恒加速度原语直接在现有核心用净空余量证书自适应二分：Da+Db>=2r+h*(|va|+|vb|)/2接受区间，否则查询中点；14层仍未证安全则拒绝原语，沿用既有搜索期限。核心数学见docs/PRIMITIVE_CLEARANCE_MATH.md。节点起点距离在候选间复用，PCL float坐标/距离舍入作微小保守修正。候选、代价、hash/queue、双树及shot保持。
 - 当前YAML：horizon=100、resolution=voxel_size=0.1、safe_distance=0.25、max_vel=max_acc=2、max_tau=0.6、collision_step=0.05、search_budget=0.3s、input_timeout=0.5s。参数在启动时复制，修改须重启。
-- Odin launch默认订阅/odin1/cloud_slam_down和/odin1/odometry，frame=odom、stamp_clock=receive、下界[-50,-50,-2]，上界来自YAML[50,50,10]；launch默认blind_radius=0覆盖YAML的0.3。勿混淆源码缺省bounds与实际启动覆盖。
+- Odin launch默认订阅/odin1/cloud_slam_down和/odin1/odometry，frame=odom、stamp_clock=receive、下界[-50,-50,-2]，上界来自YAML[50,50,10]。两个launch的blind_radius优先级为显式命令行→YAML→节点默认0；YAML默认0，不传启动参数时不覆盖YAML。勿混淆源码缺省bounds与实际启动覆盖。
 - PlanMotion服务保持原Task38接口：service_only关闭独立goal/cloud规划及诊断定时器；PLAN按请求实际p/v直接init=false搜索。正式桥使用latest_observation完整快照替换；独立入口仍50帧双树累计。CHECK_LINE/VALIDATE_TRAJECTORY离散调用旧isSafe，不提供连续净空证明。
 - 主工程接口3.4及执行层PD+DOB、水平1/垂直0.2m/s和加速度0.35/0.15m/s²保持；超包线完整曲线按统一时间缩放放慢，空间路径不变。本项目修复不修改主工程。
 
 # 部署
+
+- blind_radius默认0及两个launch的命令行→YAML→节点默认优先级修改尚未同步两机，下次同步须包含launch和config文件并更新安装目录。
 
 - drone-new=.169，drone-refresh=.186；两机项目路径均/home/nvidia/dyn_small_obs_avoidance-ros2。净空证书代码24e518f已同步两机，均完成Release安装、核心/DDS测试及固定现场点云节点回放，安装核心库SHA256一致。186曾出现源码空文件及损坏构建缓存，已恢复；同步时须核实实际源码与安装库，不能仅看Git HEAD。持续传感器CPU量化复测未记录。
 - 时间/位移重规划3bce7ae及DDS测试90024ae已同步两机，Release安装和每机12项ROS/DDS、2项C++检查通过；两机可执行文件、核心库及安装YAML的SHA256一致。新增默认参数replan_interval=1.0s、replan_distance=1.0m；service_only模式不自动重规划。
