@@ -23,6 +23,8 @@ constexpr double kAccelerationZeroTolerance = 1e-12;  // m/s²; skip division by
 constexpr double kPolynomialZeroTolerance = 1e-12;  // SI coefficient magnitude for degenerate-root branches.
 constexpr double kDerivativeLimitSlack = 1e-9;  // Absolute numerical slack for velocity/acceleration limits.
 constexpr std::array<double, 5> kShotDurationScales{1.0, 1.5, 2.0, 3.0, 4.0};  // Bounded cubic retries.
+constexpr int kPrimitiveSubdivisionLimit = 14;  // Reject intervals still unproven at this depth.
+constexpr double kNearestDistanceSlack = 8 * std::numeric_limits<float>::epsilon();  // PCL distance rounding.
 }  // namespace
 
 void SearchConfig::validate() const {
@@ -107,6 +109,41 @@ bool KinodynamicAstar::isSafe(double x, double y, double z) {
         nearest_distances_[0] < radius*radius) return false;
   }
   return true;
+}
+
+// Conservative nearest-distance bound for primitive certificates; public isSafe stays unchanged.
+double KinodynamicAstar::primitiveClearance(const Eigen::Vector3d& position) {
+  if (!map_ready_ || !inBounds(position)) return 0;
+  const pcl::PointXYZ query(position.x(), position.y(), position.z());
+  const double query_error = (position - Eigen::Vector3d(query.x, query.y, query.z)).norm();
+  double distance = std::numeric_limits<double>::infinity();
+  for (std::size_t bank = 0; bank < 2; ++bank) {
+    if (clouds_[bank]->empty()) continue;
+    if (trees_[bank].nearestKSearch(query, 1, nearest_indices_, nearest_distances_) != 1) return 0;
+    distance = std::min(distance, std::sqrt(static_cast<double>(nearest_distances_[0])) *
+                                 (1 - kNearestDistanceSlack) - query_error);
+    if (distance < config_.safe_distance) break;
+  }
+  return distance;
+}
+
+// Endpoint distance margins cover the arc-length bound; otherwise certify both temporal halves.
+bool KinodynamicAstar::isPrimitiveSafe(const Eigen::Matrix<double, 6, 1>& state,
+    const Eigen::Vector3d& acceleration, double begin, double end, double da, double db, int depth) {
+  if (std::chrono::steady_clock::now() >= deadline_) return false;
+  if (da < config_.safe_distance || db < config_.safe_distance) return false;
+  const auto velocity = state.tail(3);
+  // The norm of affine velocity is convex, so its trapezoidal integral bounds travelled length.
+  const double length_bound = (end - begin) * 0.5 * ((velocity + acceleration * begin).norm() +
+                                                   (velocity + acceleration * end).norm());
+  if (da + db >= 2 * config_.safe_distance + length_bound) return true;
+  if (depth >= kPrimitiveSubdivisionLimit) return false;
+  const double mid = (begin + end) * 0.5;
+  const Eigen::Vector3d position = state.head(3) + velocity * mid + 0.5 * acceleration * mid * mid;
+  const double dm = primitiveClearance(position);
+  if (dm < config_.safe_distance) return false;
+  return isPrimitiveSafe(state, acceleration, begin, mid, da, dm, depth + 1) &&
+         isPrimitiveSafe(state, acceleration, mid, end, dm, db, depth + 1);
 }
 
 // Weighted A*: validate endpoints, expand constant-acceleration primitives, then try a terminal cubic.
@@ -224,6 +261,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
     iter_num_ += 1;
 
     Eigen::Matrix<double, 6, 1> cur_state = cur_node->state;
+    const double primitive_start_distance = primitiveClearance(cur_state.head(3));
     Eigen::Matrix<double, 6, 1> pro_state;
     vector<PathNodePtr> tmp_expand_nodes;
     Eigen::Vector3d um;
@@ -302,33 +340,11 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
         {
             continue;
         }
-        Eigen::Vector3d pos;
-        Eigen::Matrix<double, 6, 1> xt;
-        bool is_occ = false;
-        // Speed bounds give a spatial sampling bound even on returning/curved primitives.
-        const int dyn_checknum = std::max(1, static_cast<int>(std::ceil(
-            tau * std::sqrt(3.0) * max_vel_ / config_.collision_step)));
-        for (int k = 1; k <= dyn_checknum; ++k)
+        // Reuse this node's clearance across candidates; query only unproven intervals.
+        if (!isPrimitiveSafe(cur_state, um, 0, tau, primitive_start_distance,
+                             primitiveClearance(pro_pos)))
         {
-          double dt = tau * double(k) / double(dyn_checknum);
-
-          stateTransit(cur_state, xt, um, dt);
-
-          pos = xt.head(3);
-          if (!inBounds(pos))
-          {
-            is_occ = true;
-            break;
-          }
-
-          if (!isSafe(pos(0),pos(1),pos(2))) {
-            is_occ = true;
-            break;
-          }
-
-        }
-        if (is_occ)
-        {
+            if (std::chrono::steady_clock::now() >= deadline_) { reset(); return TIMEOUT; }
             continue;
         }
 

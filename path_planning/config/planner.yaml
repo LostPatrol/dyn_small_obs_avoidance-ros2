@@ -57,8 +57,8 @@ path_planning:
     search.safe_distance: 0.25
     # Meters, >0: voxel edge for accumulated clouds; matches ROS1's 0.1 m leaf size.
     search.voxel_size: 0.1
-    # Meters, >0 and <=safe_distance: maximum travel interval between collision checks.
-    # Sampling density is independent of the radius; effective radius = safe_distance (0.45 m).
+    # Meters, >0 and <=safe_distance: terminal-shot and geometry-service sampling travel interval.
+    # Ordinary primitives adaptively certify interval clearance against safe_distance.
     search.collision_step: 0.05
     # Seconds, (0,60]: cooperative search budget, excluding map building and result serialization.
     # A difficult event-triggered search can exceed this cooperative budget; output is not periodic.

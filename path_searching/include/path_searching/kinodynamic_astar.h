@@ -22,7 +22,8 @@ struct SearchConfig {
   double w_time = 10.0, horizon = 100.0, lambda_heu = 5.0;
   // Spatial hash cell size (m); time hash bin size (s), used only with dynamic=true.
   double resolution = 0.1, time_resolution = 0.8;
-  // Clearance (m), voxel edge (m), maximum collision-sampling travel interval (m).
+  // Clearance (m), voxel edge (m), terminal-shot collision-sampling travel interval (m).
+  // Ordinary primitives certify endpoint clearance margins against an arc-length bound.
   // Match ROS1: reject distances strictly below safe_distance, without voxel/sampling inflation.
   double safe_distance = 0.45, voxel_size = 0.1, collision_step = 0.05;
   double search_budget = 0.08;  // steady-clock seconds per search, excludes map construction
@@ -185,6 +186,10 @@ class KinodynamicAstar {
   Eigen::Vector3d origin_;
   double time_origin_ = 0.0;
   std::chrono::steady_clock::time_point deadline_;
+  // Internal primitive checks use the same immutable two-bank map as isSafe().
+  double primitiveClearance(const Eigen::Vector3d& position);
+  bool isPrimitiveSafe(const Eigen::Matrix<double, 6, 1>& state, const Eigen::Vector3d& acceleration,
+                       double begin, double end, double da, double db, int depth = 0);
   Eigen::Vector3i posToIndex(Eigen::Vector3d point);
   int timeToIndex(double time);
   void retrievePath(PathNodePtr node);

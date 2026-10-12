@@ -11,6 +11,14 @@ p/v/a，不修改搜索、碰撞检查或动力学参数。请求由控制权威
 实际起点距目标小于0.3m时跳过点云重规划；失败保留重规划标记和旧路径，成功才清标记。
 初次失败且没有旧路径时不自动重试；目标先于里程计时不由定时器补发规划。
 `planning_rate` 只控制输入失效诊断，不再控制搜索频率。双树累积和现场参数不变。
+
+核心普通运动原语保留恒加速度模型，碰撞检查用端点净空余量覆盖弧长上界：
+`Da + Db >= 2 * safe_distance + h * (|va| + |vb|) / 2` 时接受整段，否则查询中点并细分。
+起点距离在本次节点展开的候选间复用；未能确认的区间受现有搜索期限及14层细分限制。
+此检查只作用于普通原语。`collision_step` 仍用于末端shot和几何服务的离散检查，
+整条含shot轨迹仍不提供连续净空证明。修改核心检查应从
+`path_searching/src/kinodynamic_astar.cpp` 的 `isPrimitiveSafe()` 入手。
+
 正式集成设置 `service_only=true`，仅响应显式服务请求；
 可同时设置 `cloud.map_mode=latest_observation`，由桥提供完整占用快照，每次在 wrapper 中
 `clearMap()` 后 `setKdtree()`，防止已由桥退役的障碍继续残留。此模式要求 service-only，
