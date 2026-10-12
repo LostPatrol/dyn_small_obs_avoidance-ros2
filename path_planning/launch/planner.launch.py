@@ -1,37 +1,38 @@
-"""Launch only the standalone planner; remap externally registered cloud/odometry/goal inputs."""
+"""Launch the standalone planner with CLI > YAML > default parameter precedence."""
+from pathlib import Path
+import runpy
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
-from ament_index_python.packages import get_package_share_directory
-from pathlib import Path
-
-
-def generate_launch_description():
-    """Declare inputs and an optional command-line blind radius override."""
-    config = str(Path(get_package_share_directory('path_planning')) / 'config/planner.yaml')
-    return LaunchDescription([
-        DeclareLaunchArgument('config', default_value=config),
-        DeclareLaunchArgument('cloud', default_value='/cloud_registered'),
-        DeclareLaunchArgument('odom', default_value='/Odometry'),
-        DeclareLaunchArgument('goal', default_value='/goal'),
-        DeclareLaunchArgument('time_index', default_value='/demo_node/trajectory_time_index'),
-        DeclareLaunchArgument('blind_radius', default_value='',
-                              description='Override cloud.blind_radius; omitted uses YAML or node default 0.'),
-        OpaqueFunction(function=_launch_node),
-    ])
 
 
 def _launch_node(context):
-    """Keep the YAML radius unless the command line explicitly overrides it."""
-    overrides = {}
-    if LaunchConfiguration('blind_radius').perform(context):
-        overrides['cloud.blind_radius'] = ParameterValue(
-            LaunchConfiguration('blind_radius'), value_type=float)
+    """Resolve the selected YAML and explicit arguments before constructing the node."""
+    helper = runpy.run_path(str(Path(get_package_share_directory('path_planning')) /
+                                'launch/parameter_config.py'))
+    data = helper['load_config'](LaunchConfiguration('config').perform(context))
+    parameters = helper['node_parameters'](
+        data, ('/**', 'path_planning', '/path_planning'), {})
+    parameters = helper['planner_overrides'](context, parameters)
+    topics = helper['node_parameters'](data, ('planner_launch',), {
+        'cloud': '/cloud_registered', 'odom': '/Odometry',
+        'goal': '/goal', 'time_index': '/demo_node/trajectory_time_index',
+    })
     return [Node(package='path_planning', executable='path_planning_node', name='path_planning',
-             output='screen', parameters=[LaunchConfiguration('config'), overrides],
-             remappings=[('cloud', LaunchConfiguration('cloud')), ('odom', LaunchConfiguration('odom')),
-                         ('goal', LaunchConfiguration('goal')),
-                         ('time_index', LaunchConfiguration('time_index'))]),
-    ]
+                 output='screen', parameters=[parameters],
+                 remappings=[(name, helper['launch_value'](context, name, value))
+                             for name, value in topics.items()])]
+
+
+def generate_launch_description():
+    """Declare optional arguments; empty values defer to the selected YAML configuration."""
+    config = str(Path(get_package_share_directory('path_planning')) / 'config/planner.yaml')
+    arguments = [DeclareLaunchArgument('config', default_value=config)]
+    arguments.extend(DeclareLaunchArgument(name, default_value='') for name in (
+        'cloud', 'odom', 'goal', 'time_index', 'blind_radius', 'map_mode',
+        'service_only', 'planning_frame', 'stamp_clock', 'search_lower',
+    ))
+    return LaunchDescription([*arguments, OpaqueFunction(function=_launch_node)])

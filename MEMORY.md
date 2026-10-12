@@ -6,14 +6,14 @@
 - 独立入口先init=true、NO_PATH才init=false；内部旧路径检查/执行索引缓存按0.01s采样，公共输出仍由sample_step控制。launch默认将time_index映射到/demo_node/trajectory_time_index：原goal/受阻事件有索引时绝对差<10节流，从旧路径index+3及差分速度规划；新增时间/位移触发及无索引时用实际odom p/v。仅防未初始化读取和确定越界。
 - 普通恒加速度原语直接在现有核心用净空余量证书自适应二分：Da+Db>=2r+h*(|va|+|vb|)/2接受区间，否则查询中点；14层仍未证安全则拒绝原语，沿用既有搜索期限。核心数学见docs/PRIMITIVE_CLEARANCE_MATH.md。节点起点距离在候选间复用，PCL float坐标/距离舍入作微小保守修正。候选、代价、hash/queue、双树及shot保持。
 - 当前YAML：horizon=100、resolution=voxel_size=0.1、safe_distance=0.25、max_vel=max_acc=2、max_tau=0.6、collision_step=0.05、search_budget=0.3s、input_timeout=0.5s。参数在启动时复制，修改须重启。
-- Odin launch默认订阅/odin1/cloud_slam_down和/odin1/odometry，frame=odom、stamp_clock=receive、下界[-50,-50,-2]，上界来自YAML[50,50,10]。两个launch的blind_radius优先级为显式命令行→YAML→节点默认0；YAML默认0，不传启动参数时不覆盖YAML。勿混淆源码缺省bounds与实际启动覆盖。
+- 三个launch统一CLI→同一planner.yaml→默认值；公共YAML配置frame=odom、stamp_clock=receive、下界[-50,-50,-2]、盲区0，/avoidance/path_planning专属段仅选service_only=true/latest_observation。独立launch话题存odin_launch/planner_launch，桥参数存avoidance_bridge；配置读取失败告警回退，非法值仍由节点校验。支持search.safe_distance等完整名及blind_radius/map_mode/search_lower短名，修改须重启。
 - PlanMotion服务保持原Task38接口：service_only关闭独立goal/cloud规划及诊断定时器；PLAN按请求实际p/v直接init=false搜索。正式桥使用latest_observation完整快照替换；独立入口按search.tree_period=20帧双树累计（对应ROS1 KT_HORIZON），历史约20–40次有效更新。CHECK_LINE/VALIDATE_TRAJECTORY离散调用旧isSafe，不提供连续净空证明。
 - 主工程接口3.4及执行层PD+DOB、水平1/垂直0.2m/s和加速度0.35/0.15m/s²保持；超包线完整曲线按统一时间缩放放慢，空间路径不变。本项目修复不修改主工程。
 
 # 部署
 
 - KT_HORIZON对应search.tree_period，当前YAML及C++默认均为20；已同步drone-refresh(.186)及drone-new(.169)源码和Release安装目录，下次启动生效。
-- blind_radius默认0的YAML已随tree_period=20配置同步两机；两个launch的命令行→YAML→节点默认优先级修改仍待同步，下次须同步launch并更新安装目录。
+- 统一参数优先级、共享launch/parameter_config.py及YAML节点profile已同步开发机和refresh源码/安装资产，refresh隔离域实参通过；**new尚未同步本次修改**。不重启现有硬件/控制进程，下次启动生效。主工程avoidance.launch.py也须同步，旧入口仍存在硬覆盖。
 
 - drone-new=.169，drone-refresh=.186；两机项目路径均/home/nvidia/dyn_small_obs_avoidance-ros2。净空证书代码24e518f已同步两机，均完成Release安装、核心/DDS测试及固定现场点云节点回放，安装核心库SHA256一致。186曾出现源码空文件及损坏构建缓存，已恢复；同步时须核实实际源码与安装库，不能仅看Git HEAD。持续传感器CPU量化复测未记录。
 - 时间/位移重规划3bce7ae及DDS测试90024ae已同步两机；当前默认参数replan_interval=0.2s、replan_distance=1.0m，C++默认及YAML已同步两机并完成Release安装。service_only模式不自动重规划。

@@ -1,4 +1,4 @@
-# Generic defaults; inputs must share the planning frame. No sensor or vehicle is launched.
+# Shared Odin/planner defaults and explicit bridge profile; no hardware is launched.
 # Values are read at startup: restart the node to apply edits. Units below are SI.
 # Bounds/clearance are example planning settings, not a calibrated vehicle safety envelope.
 path_planning:
@@ -15,7 +15,11 @@ path_planning:
     # In ros mode the same limit also applies to header age; source time may lead by at most 0.05 s.
     input_timeout: 0.5
     # receive mode preserves device timestamps but cannot measure upstream acquisition/transport delay.
-    stamp_clock: ros  # ros: validate header age; receive: explicitly accept unknown sensor-clock offset
+    stamp_clock: receive  # ros: validate header age; receive: explicitly accept unknown sensor-clock offset
+    # Standalone goal/timer planning; the bridge profile below selects request-only planning.
+    service_only: false
+    # Accumulate scans in two alternating KD trees; the bridge supplies complete snapshots instead.
+    cloud.map_mode: dual_tree
     odometry_twist_in_body: true  # nav_msgs/Odometry twist is expressed in child_frame_id
     # Metres, >=0: remove points strictly inside this 3D radius before map accumulation; 0 disables.
     # This is a sensor blind zone, not body classification: real obstacles inside it are also removed.
@@ -76,5 +80,37 @@ path_planning:
     search.max_cloud_points: 500000
     # Meters: inclusive world-frame [x,y,z] bounds, each lower coordinate strictly below upper.
     # Shared by primitives and terminal curves; this volume is not a sensor-coverage declaration.
-    search.lower: [-50.0, -50.0, 0.2]
+    search.lower: [-50.0, -50.0, -2.0]
     search.upper: [50.0, 50.0, 10.0]
+
+# This node profile inherits common tuning above and changes only the bridge execution mode.
+/avoidance/path_planning:
+  ros__parameters:
+    service_only: true
+    cloud.map_mode: latest_observation
+
+# Topic defaults consumed by the independent launch files, not by the planner node.
+odin_launch:
+  ros__parameters:
+    cloud: /odin1/cloud_slam_down
+    odom: /odin1/odometry
+    goal: /goal
+    time_index: /demo_node/trajectory_time_index
+planner_launch:
+  ros__parameters:
+    cloud: /cloud_registered
+    odom: /Odometry
+    goal: /goal
+    time_index: /demo_node/trajectory_time_index
+
+# Bridge parameters; input_timeout inherits the common planner value unless set here explicitly.
+avoidance_bridge:
+  ros__parameters:
+    coordinate_mode: extnav
+    cloud_topic: /odin1/cloud_slam_down
+    odometry_topic: /odin1/odometry_highfreq
+    preview_enabled: false
+    voxel_size: 0.1
+    map_radius: 20.0
+    max_cells: 300000
+    max_cloud_points: 500000

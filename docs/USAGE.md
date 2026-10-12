@@ -236,8 +236,22 @@ ros2 topic echo /plan_result --field status
 ros2 topic echo /kino_path --once
 ```
 
-专用启动文件覆盖 `planning_frame=odom`、`stamp_clock=receive` 和
-`search.lower=[-50,-50,-2]`（米），其余参数继承通用配置；不会启动传感器或飞控。
+两个独立launch与主工程避障launch按显式命令行 → YAML → launch/节点默认值读取参数。
+公共YAML设置 `planning_frame=odom`、`stamp_clock=receive`、`search.lower=[-50,-50,-2]`，
+不会被launch固定覆盖；ROS时钟输入需配置 `stamp_clock: ros` 或显式传 `stamp_clock:=ros`。
+文件不可读或YAML语法/段结构错误时打印警告并回退，非法参数值仍由节点校验。不会启动传感器或飞控。
+
+任意规划参数可显式传入，例如 `search.safe_distance:=0.3`、`service_only:=true`、
+`map_mode:=dual_tree`、`'search.lower:=[-50,-50,-3]'`。短名 `blind_radius`/`map_mode`/`search_lower`
+分别对应 `cloud.blind_radius`/`cloud.map_mode`/`search.lower`，不要同时提供短名和完整名。
+默认读取安装目录YAML；修改源码配置须重新构建，或 `config:=/绝对路径/planner.yaml`；生效需要重启。
+
+`path_planning` 段是公共参数；`/avoidance/path_planning` 段仅为桥模式选定
+`service_only: true`、`cloud.map_mode: latest_observation`。独立模式默认false/dual_tree。
+`odin_launch`/`planner_launch` 段配置输入话题，`avoidance_bridge` 段配置主工程桥。
+服务模式仍接收地图并提供PlanMotion，不再按独立goal或定时器发起规划。
+latest_observation替换收到的完整地图；dual_tree按有效点云帧在两棵KD树内累计，
+由 `search.tree_period` 控制轮换，历史淘汰并非按墙钟。latest_observation要求service_only=true。
 下界用于包含初始位置附近的地面台架起点，不代表真实地面高度或允许飞行空间。
 接收时间模式不能判断传感器端积压延迟。目标必须使用 `odom`；输出是 `/kino_path`，有下划线。
 状态 1/2 才含轨迹，3 表示无路；即使配置正确，起点附近的地面或机体点也可能使安全距离检查失败。

@@ -54,3 +54,8 @@ ctest --test-dir build/path_planning -R test_motion_adapter --output-on-failure
 ```
 
 上述测试仅使用隔离 DDS 域和合成几何，无飞控命令或实机解锁/起飞。
+
+参数来源按显式launch参数 → `planner.yaml`节点段 → 默认值；公共段为`path_planning`，
+主工程桥模式段为`/avoidance/path_planning`。文件不可读/语法错误打印警告并回退；
+参数值非法仍由节点校验。可直接传`search.max_vel:=1.5`、`blind_radius:=0.0`等，
+修改源码YAML须更新安装配置并重启。配置与两种地图模式见[使用说明](../docs/USAGE.md)。
