@@ -1,4 +1,4 @@
-"""Real isolated DDS service regressions; no odometry, goal publisher or flight hardware."""
+"""Real isolated DDS native map/service regressions; no odometry, goal publisher or flight hardware."""
 import os
 import signal
 import subprocess
@@ -18,14 +18,13 @@ from sensor_msgs_py.point_cloud2 import create_cloud_xyz32
 from std_msgs.msg import Header
 
 
-def test_service_snapshot_and_queries(tmp_path):
-    """Exercise installed service identity, old planner outputs and geometry on replaced maps."""
+def test_service_dual_tree_and_queries(tmp_path):
+    """Exercise installed service identity, old planner outputs and geometry on alternating map banks."""
     exe = get_package_prefix('path_planning') + '/lib/path_planning/path_planning_node'
     log_path = tmp_path / 'service.log'
     with log_path.open('w') as log:
         proc = subprocess.Popen([
-            exe, '--ros-args', '-p', 'planning_frame:=map', '-p', 'service_only:=true',
-            '-p', 'cloud.map_mode:=latest_observation', '-p', 'input_timeout:=2.0',
+            exe, '--ros-args', '-p', 'planning_frame:=map', '-p', 'search.tree_period:=1', '-p', 'input_timeout:=2.0',
             '-p', 'search.safe_distance:=0.25', '-p', 'search.voxel_size:=0.1',
             '-p', 'search.search_budget:=0.3', '-p', 'stamp_clock:=receive',
         ], stdout=log, stderr=log)
@@ -46,10 +45,12 @@ def test_service_snapshot_and_queries(tmp_path):
                     return
             assert predicate(), log_path.read_text()
 
-        def cloud(points):
-            header = Header(frame_id='map', stamp=node.get_clock().now().to_msg())
-            publisher.publish(create_cloud_xyz32(header, points))
-            wait(lambda: header.stamp in filtered)
+        def cloud(points, updates=2):
+            """Send accepted scans; two updates retire both old banks with tree_period=1."""
+            for _ in range(updates):
+                header = Header(frame_id='map', stamp=node.get_clock().now().to_msg())
+                publisher.publish(create_cloud_xyz32(header, points))
+                wait(lambda: header.stamp in filtered)
             return header.stamp
 
         def request(mode=PlanMotion.Request.CHECK_LINE):
@@ -61,9 +62,14 @@ def test_service_snapshot_and_queries(tmp_path):
             return q
 
         def call(q):
+            """Every query response exposes the installed native dynamics, including failures."""
             future = client.call_async(q)
             wait(future.done)
-            return future.result()
+            response = future.result()
+            result = response.result
+            assert (result.max_velocity_xy, result.max_velocity_z,
+                    result.max_acceleration_xy, result.max_acceleration_z) == (1., .2, 2., 2.)
+            return response
 
         try:
             assert client.wait_for_service(timeout_sec=5), log_path.read_text()
@@ -77,7 +83,9 @@ def test_service_snapshot_and_queries(tmp_path):
             assert response.result.status == PlanResult.NO_PATH
             assert not response.result.segments
 
-            new_stamp = cloud([(10., 10., 1.)])
+            cloud([(10., 10., 1.)], updates=1)
+            assert call(request()).result.status == PlanResult.NO_PATH  # Old bank remains.
+            new_stamp = cloud([(10., 10., 1.)], updates=1)
             response = call(request())
             assert response.planner_session == session
             assert response.result.cloud_stamp == new_stamp

@@ -73,6 +73,10 @@ def test_planner_process(tmp_path, blind_radius):
     with (tmp_path / 'node.log').open('w') as log:
         proc = subprocess.Popen([exe, '--ros-args', '-p', 'planning_frame:=map',
                                  '-p', 'input_timeout:=0.4',
+                                 '-p', 'search.max_vel:=2.0', '-p', 'search.max_acc:=2.0',
+                                 '-p', 'search.max_vel_xy:=2.82842712474619',
+                                 '-p', 'search.max_acc_xy:=2.82842712474619',
+                                 '-p', 'search.safe_distance:=0.45',
                                  '-p', f'cloud.blind_radius:={blind_radius}',
                                  '-p', 'stamp_clock:=' + ('receive' if blind_radius else 'ros'),
                                  '-p', 'cloud.blind_origin_offset:=[0.2, 0.0, 0.0]',
@@ -147,7 +151,8 @@ def test_planner_process(tmp_path, blind_radius):
             raise AssertionError([(r.status, r.detail, r.planning_ms) for r in results[-10:]])
 
         try:
-            wait_for(lambda r: r.status == r.WAITING_FOR_INPUT)
+            # Idle has no active goal and therefore emits no diagnostic results.
+            wait_for(lambda r: r.status == r.WAITING_FOR_INPUT, target)
             ok = wait_for(lambda r: r.status == r.REACH_END, lambda: (feed(), target()))
             assert ok.segments and ok.trajectory.points
             assert abs(ok.trajectory.points[-1].transforms[0].translation.x-4)<1e-8

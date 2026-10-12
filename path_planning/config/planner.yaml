@@ -1,4 +1,4 @@
-# Shared Odin/planner defaults and explicit bridge profile; no hardware is launched.
+# Shared Odin/planner defaults and native autonomous bridge interface; no hardware is launched.
 # Values are read at startup: restart the node to apply edits. Units below are SI.
 # Bounds/clearance are example planning settings, not a calibrated vehicle safety envelope.
 path_planning:
@@ -16,9 +16,7 @@ path_planning:
     input_timeout: 0.5
     # receive mode preserves device timestamps but cannot measure upstream acquisition/transport delay.
     stamp_clock: receive  # ros: validate header age; receive: explicitly accept unknown sensor-clock offset
-    # Standalone goal/timer planning; the bridge profile below selects request-only planning.
-    service_only: false
-    # Accumulate scans in two alternating KD trees; the bridge supplies complete snapshots instead.
+    # Native alternating KD-tree accumulation; no bridge snapshot profile.
     cloud.map_mode: dual_tree
     odometry_twist_in_body: true  # nav_msgs/Odometry twist is expressed in child_frame_id
     # Metres, >=0: remove points strictly inside this 3D radius before map accumulation; 0 disables.
@@ -43,13 +41,20 @@ path_planning:
     output.build_budget: 0.1
 
     # Seconds, >0: regular acceleration-primitive duration; larger steps change search reach/granularity.
+    # Narrow speed-limited axes retain five controls sampled from the feasible acceleration interval.
     search.max_tau: 0.6
     # Seconds, >0: maximum initial fixed-acceleration primitive duration (20 candidate durations).
     # Standalone tries init=true first; explicit motion-service PLAN retains init=false.
     search.init_max_tau: 0.8
-    # m/s and m/s², >0, per axis. Euclidean limits can be sqrt(3) times these values.
-    search.max_vel: 2.0
+    # Legacy scalar caps, m/s and m/s² per axis; directional limits below also apply.
+    search.max_vel: 1.0
     search.max_acc: 2.0
+    # Avoidance-only limits: single source for native planning and execution result metadata.
+    # Horizontal vector norms and vertical absolute limits; straight control has its own config.
+    search.max_vel_xy: 1.0  # m/s
+    search.max_vel_z: 0.2  # m/s
+    search.max_acc_xy: 2.0  # m/s²; original scalar was per-axis, not a horizontal norm.
+    search.max_acc_z: 2.0  # m/s²
     # Positive time penalty in integral(||acceleration||² + w_time) dt; larger favors shorter durations.
     search.w_time: 10.0
     # Meters, >0: displacement from start that permits a partial REACH_HORIZON result, not path length.
@@ -83,12 +88,6 @@ path_planning:
     search.lower: [-50.0, -50.0, -2.0]
     search.upper: [50.0, 50.0, 10.0]
 
-# This node profile inherits common tuning above and changes only the bridge execution mode.
-/avoidance/path_planning:
-  ros__parameters:
-    service_only: true
-    cloud.map_mode: latest_observation
-
 # Topic defaults consumed by the independent launch files, not by the planner node.
 odin_launch:
   ros__parameters:
@@ -107,10 +106,5 @@ planner_launch:
 avoidance_bridge:
   ros__parameters:
     coordinate_mode: extnav
-    cloud_topic: /odin1/cloud_slam_down
-    odometry_topic: /odin1/odometry_highfreq
+    odometry_topic: /mavros/local_position/odom
     preview_enabled: false
-    voxel_size: 0.1
-    map_radius: 20.0
-    max_cells: 300000
-    max_cloud_points: 500000

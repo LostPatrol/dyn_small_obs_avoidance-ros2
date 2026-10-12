@@ -6,7 +6,12 @@
 #include <set>
 using Eigen::Vector3d;
 namespace {
-SearchConfig config() { SearchConfig c; c.search_budget=2.0; return c; }
+// Existing geometry/lattice regressions retain their explicit legacy envelope and primitive duration.
+SearchConfig config() {
+  SearchConfig c; c.search_budget=2.0; c.max_tau=0.6; c.max_vel=c.max_acc=2.0;
+  c.max_vel_xy=c.max_acc_xy=std::sqrt(2.0)*2.0; c.max_vel_z=c.max_acc_z=2.0;
+  c.safe_distance=0.45; c.lower.z()=0.2; return c;
+}
 pcl::PointCloud<pcl::PointXYZ> background() {
   pcl::PointCloud<pcl::PointXYZ> c; c.push_back({-20,-20,1}); return c;
 }
@@ -28,6 +33,10 @@ void validate(KinodynamicAstar& k, const pcl::PointCloud<pcl::PointXYZ>& cloud, 
       Vector3d a=2*c.col(2)+6*c.col(3)*t;
       ASSERT_LE(v.cwiseAbs().maxCoeff(),k.config().max_vel+1e-8);
       ASSERT_LE(a.cwiseAbs().maxCoeff(),k.config().max_acc+1e-8);
+      ASSERT_LE(v.head<2>().norm(),k.config().max_vel_xy+1e-8);
+      ASSERT_LE(std::abs(v.z()),k.config().max_vel_z+1e-8);
+      ASSERT_LE(a.head<2>().norm(),k.config().max_acc_xy+1e-8);
+      ASSERT_LE(std::abs(a.z()),k.config().max_acc_z+1e-8);
       ASSERT_TRUE((p.array()>=k.config().lower.array()-1e-8).all());
       ASSERT_TRUE((p.array()<=k.config().upper.array()+1e-8).all());
       for (const auto& q:cloud) ASSERT_GE((p-Vector3d(q.x,q.y,q.z)).norm(),k.config().safe_distance);
@@ -199,12 +208,16 @@ TEST(Search, NumericRangeAndAccelerationInputFailuresAreExplicit) {
   }
   EXPECT_EQ(k.search({0,0,1},{0,0,0},{0,0,0},{4,0,1},{0,0,0},false,true,1e300),
             KinodynamicAstar::INVALID_INPUT);
-  c=config(); c.max_acc=1e150; c.search_budget=0.02;
+  c=config(); c.max_acc=c.max_acc_xy=c.max_acc_z=1e150; c.search_budget=0.02;
   KinodynamicAstar large(c); ASSERT_TRUE(large.setKdtree(background()));
   const auto began=std::chrono::steady_clock::now();
   const int status=plan(large);
-  EXPECT_TRUE(status==KinodynamicAstar::NO_PATH || status==KinodynamicAstar::TIMEOUT);
-  EXPECT_TRUE(large.getSegments().empty());
+  // Feasible axis sampling can now produce finite controls even under a huge configured cap.
+  if (status==KinodynamicAstar::REACH_END) validate(large,background(),{4,0,1});
+  else {
+    EXPECT_TRUE(status==KinodynamicAstar::NO_PATH || status==KinodynamicAstar::TIMEOUT);
+    EXPECT_TRUE(large.getSegments().empty());
+  }
   EXPECT_LT(std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count(),0.5);
 }
 // The normal period is 20 accepted clouds. Mark each bank independently at its first update.
@@ -262,4 +275,48 @@ TEST(Search, CollisionBetweenPrimitiveEndpoints) {
   k.setKdtree(c);
   ASSERT_EQ(plan(k,{0,0,1},{3,0,1},{1.2,0,0}),KinodynamicAstar::REACH_END);
   validate(k,c,{3,0,1});
+}
+
+// Native envelope is evaluated directly on exact output curves, without any retiming.
+TEST(Search, NativeDirectionalEnvelopeOnPrimitivesAndTerminalShot) {
+  SearchConfig c; KinodynamicAstar k(c); auto cloud=background(); ASSERT_TRUE(k.setKdtree(cloud));
+  for (const Vector3d goal : {Vector3d(0.5,0.5,1.4),Vector3d(4,0,1),Vector3d(4,2,2.4),Vector3d(0,0,2.4)}) {
+    ASSERT_EQ(plan(k,{0,0,1},goal),KinodynamicAstar::REACH_END);
+    validate(k,cloud,goal);
+  }
+  EXPECT_EQ(plan(k,{0,0,1},{0.5,0.5,1.4},{0.8,0.8,0}),KinodynamicAstar::INVALID_INPUT);
+  EXPECT_EQ(plan(k,{0,0,1},{0.5,0.5,1.4},{0,0,0.21}),KinodynamicAstar::INVALID_INPUT);
+  EXPECT_EQ(k.search({0,0,1},{0,0,0},{1.5,1.5,0},{0.5,0.5,1.4},{0,0,0},true),
+            KinodynamicAstar::INVALID_INPUT);
+}
+
+// A finite pole permits vertical avoidance; densely check the original obstacle points and time derivatives.
+TEST(Search, NativeDirectionalEnvelopeAroundFinitePole) {
+  SearchConfig c; KinodynamicAstar k(c); auto cloud=background();
+  for (float z=0;z<=1.8f;z+=0.025f) cloud.push_back({1.5f,0,z});
+  ASSERT_TRUE(k.setKdtree(cloud));
+  ASSERT_EQ(plan(k,{0,0,1},{3,0,1}),KinodynamicAstar::REACH_END);
+  validate(k,cloud,{3,0,1});
+}
+
+// Initial short coasts are valid prefixes even before they leave the root's spatial hash cell.
+TEST(Search, InitialSameCellRetainsAllTwentyDurationsWithoutReplacingRoot) {
+  SearchConfig c; c.horizon=0.1; KinodynamicAstar k(c); ASSERT_TRUE(k.setKdtree(background()));
+  ASSERT_EQ(k.search({0,0,1},{0,0,0},{0,0,0},{4,0,1},{0,0,0},true),
+            KinodynamicAstar::REACH_HORIZON);
+  const auto visited=k.getVisitedNodes(); ASSERT_FALSE(visited.empty());
+  std::set<double> durations;
+  for (const auto node:visited) {
+    if (node->parent!=visited.front()) continue;
+    EXPECT_EQ(node->index,visited.front()->index);
+    EXPECT_EQ(node->input,Vector3d::Zero());
+    durations.insert(node->duration);
+  }
+  ASSERT_EQ(durations.size(),20u);
+  EXPECT_DOUBLE_EQ(*durations.begin(),c.init_max_tau/20);
+  EXPECT_DOUBLE_EQ(*durations.rbegin(),c.init_max_tau);
+  const auto segments=k.getSegments(); ASSERT_GT(segments.size(),1u);
+  EXPECT_DOUBLE_EQ(segments.front().duration,c.init_max_tau/20);
+  EXPECT_EQ(segments.front().coefficients.col(2),Vector3d::Zero());
+  EXPECT_EQ(visited.front()->parent,nullptr);
 }

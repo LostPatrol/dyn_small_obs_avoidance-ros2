@@ -34,6 +34,6 @@ def generate_launch_description():
     arguments = [DeclareLaunchArgument('config', default_value=config)]
     arguments.extend(DeclareLaunchArgument(name, default_value='') for name in (
         'cloud', 'odom', 'goal', 'time_index', 'blind_radius', 'map_mode',
-        'service_only', 'planning_frame', 'stamp_clock', 'search_lower',
+        'planning_frame', 'stamp_clock', 'search_lower',
     ))
     return LaunchDescription([*arguments, OpaqueFunction(function=_launch_node)])

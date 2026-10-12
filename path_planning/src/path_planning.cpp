@@ -4,6 +4,7 @@
 #include <path_searching/kinodynamic_astar.h>
 #include <path_planning/msg/plan_result.hpp>
 #include <path_planning/srv/plan_motion.hpp>
+#include <path_planning/srv/set_goal.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -30,6 +31,8 @@ constexpr uint32_t kFloat32Bytes = 4;  // PointField::FLOAT32 wire width, indepe
 constexpr uint32_t kXyzFieldCount = 3;  // Required scalar x/y/z; other fields may coexist.
 constexpr size_t kBlindPoseHistorySize = 256;  // Bounded history (~0.64 s at 400 Hz).
 constexpr int kMaxOutputSamples = 1000000;  // Matches the core's absolute sampling allocation cap.
+constexpr double kIdentityHeartbeatSeconds = 1.0;  // Session visibility without a target/search.
+constexpr double kNearGoalDistanceMeters = 0.3;  // Suppress replans only while a successful curve remains valid.
 constexpr double kMaxOutputDuration = 3600.0;  // Seconds; avoids unbounded/ROS-duration-sized outputs.
 }  // namespace
 
@@ -42,34 +45,39 @@ class Planner : public rclcpp::Node {
     SearchConfig c;
 #define PARAM(field) c.field = declare_parameter("search." #field, c.field)
     PARAM(max_tau); PARAM(init_max_tau); PARAM(max_vel); PARAM(max_acc); PARAM(w_time);
+    // Scalar ROS overrides remain shorthand; explicit directional values are more specific.
+    const auto& overrides=get_node_parameters_interface()->get_parameter_overrides();
+    if (overrides.count("search.max_vel")) c.max_vel_xy=c.max_vel_z=c.max_vel;
+    if (overrides.count("search.max_acc")) c.max_acc_xy=c.max_acc_z=c.max_acc;
+    PARAM(max_vel_xy); PARAM(max_vel_z); PARAM(max_acc_xy); PARAM(max_acc_z);
     PARAM(horizon); PARAM(lambda_heu); PARAM(resolution); PARAM(time_resolution);
     PARAM(safe_distance); PARAM(voxel_size); PARAM(collision_step); PARAM(search_budget);
     PARAM(allocate_num); PARAM(tree_period);
 #undef PARAM
+    // Core retains legacy scalar caps; explicit directional ROS limits may widen those caps.
+    c.max_vel=std::max({c.max_vel,c.max_vel_xy,c.max_vel_z});
+    c.max_acc=std::max({c.max_acc,c.max_acc_xy,c.max_acc_z});
     const int max_points = declare_parameter("search.max_cloud_points", static_cast<int>(c.max_cloud_points));
     if (max_points < 1) throw std::invalid_argument("max_cloud_points must be positive");
     c.max_cloud_points = max_points;
-    auto lower = declare_parameter("search.lower", std::vector<double>{-50,-50,0.2});
-    auto upper = declare_parameter("search.upper", std::vector<double>{50,50,5});
+    auto lower = declare_parameter("search.lower", std::vector<double>{c.lower.x(),c.lower.y(),c.lower.z()});
+    auto upper = declare_parameter("search.upper", std::vector<double>{c.upper.x(),c.upper.y(),c.upper.z()});
     if (lower.size()!=3 || upper.size()!=3) throw std::invalid_argument("bounds require three coordinates");
     c.lower=Eigen::Map<Vector>(lower.data()); c.upper=Eigen::Map<Vector>(upper.data());
     core_ = std::make_unique<KinodynamicAstar>(c);
-    frame_=declare_parameter("planning_frame", "camera_init");
+    frame_=declare_parameter("planning_frame", "odom");
     rate_=declare_parameter("planning_rate",10.0); timeout_=declare_parameter("input_timeout",0.5);
     replan_interval_=declare_parameter("replan_interval",0.2);
     replan_distance_=declare_parameter("replan_distance",1.0);
-    step_=declare_parameter("sample_step",0.02); stamp_clock_=declare_parameter("stamp_clock","ros");
+    step_=declare_parameter("sample_step",0.02); stamp_clock_=declare_parameter("stamp_clock","receive");
     max_samples_=declare_parameter("output.max_samples",10000);
     max_duration_=declare_parameter("output.max_duration",60.0);
     build_budget_=declare_parameter("output.build_budget",0.1);
     body_twist_=declare_parameter("odometry_twist_in_body",true);
     blind_radius_=declare_parameter("cloud.blind_radius",0.0);
-    service_only_=declare_parameter("service_only",false);
-    map_mode_=declare_parameter("cloud.map_mode",std::string("dual_tree"));
-    if (map_mode_!="dual_tree" && map_mode_!="latest_observation")
-      throw std::invalid_argument("invalid cloud.map_mode");
-    if (map_mode_=="latest_observation" && !service_only_)
-      throw std::invalid_argument("latest_observation requires service_only");
+    // Retain the readable legacy parameter; all planning uses the native dual-tree map.
+    if (declare_parameter("cloud.map_mode",std::string("dual_tree"))!="dual_tree")
+      throw std::invalid_argument("cloud.map_mode must be dual_tree");
     planner_session_=std::to_string(Clock::now().time_since_epoch().count());
     blind_pose_tolerance_=declare_parameter("cloud.blind_pose_tolerance",0.05);
     blind_wait_=declare_parameter("cloud.blind_wait",0.15);
@@ -93,7 +101,7 @@ class Planner : public rclcpp::Node {
         [this](nav_msgs::msg::Odometry::ConstSharedPtr m){ odom(*m); });
     goal_sub_=create_subscription<geometry_msgs::msg::PoseStamped>("goal",rclcpp::QoS(1),
         [this](geometry_msgs::msg::PoseStamped::ConstSharedPtr m){ goal(*m); });
-    if (!service_only_) index_sub_=create_subscription<std_msgs::msg::Int64>("time_index",rclcpp::QoS(1000),
+    index_sub_=create_subscription<std_msgs::msg::Int64>("time_index",rclcpp::QoS(1000),
         [this](std_msgs::msg::Int64::ConstSharedPtr m){ replan_index_=m->data; });
     result_pub_=create_publisher<Result>("plan_result",rclcpp::QoS(1));
     path_pub_=create_publisher<nav_msgs::msg::Path>("kino_path",rclcpp::QoS(1));
@@ -101,12 +109,21 @@ class Planner : public rclcpp::Node {
     motion_service_=create_service<path_planning::srv::PlanMotion>("plan_motion",
       [this](const path_planning::srv::PlanMotion::Request::SharedPtr request,
              path_planning::srv::PlanMotion::Response::SharedPtr response) { motion(*request,*response); });
+    goal_service_=create_service<path_planning::srv::SetGoal>("set_goal",
+      [this](const path_planning::srv::SetGoal::Request::SharedPtr request,
+             path_planning::srv::SetGoal::Response::SharedPtr response) {
+        setGoal(*request,*response);
+      });
     // Reuse the existing timer for elapsed-time checks and input-loss diagnostics.
-    if (!service_only_) timer_=create_wall_timer(std::chrono::duration<double>(1/rate_),[this]{
+    timer_=create_wall_timer(std::chrono::duration<double>(1/rate_),[this]{
       processPendingCloud();
+      if (!goal_active_) { identityHeartbeat(); return; }
       if (goal_status_ || odom_status_ || cloud_status_ || !fresh(cloud_received_,cloud_stamp_) ||
           !fresh(odom_received_,odom_stamp_)) executePlan(position_,velocity_,goal_,false);
-      else replan(false);
+      else {
+        replan(false);
+        if (successful_curve_valid_ && (goal_-position_).norm()<kNearGoalDistanceMeters) identityHeartbeat();
+      }
     });
     RCLCPP_INFO(get_logger(),"Planner ready: frame=%s, replan_interval=%.3fs, replan_distance=%.3fm, clock=%s",
         frame_.c_str(),replan_interval_,replan_distance_,stamp_clock_.c_str());
@@ -215,15 +232,13 @@ class Planner : public rclcpp::Node {
         invalidateCloud(Result::NO_MAP,"all cloud points removed by blind filter"); return;
       }
     }
-    // The bridge owns persistent observation evidence. Replace its complete snapshots only in
-    // explicit service mode; standalone retains the deployed two-bank accumulation unchanged.
-    if (service_only_ && map_mode_=="latest_observation") core_->clearMap();
+    // All entry points retain the native alternating KD-tree history.
     if (!core_->setKdtree(points)) { invalidateCloud(Result::INVALID_INPUT,"nonfinite cloud or map capacity exceeded"); return; }
     sensor_msgs::msg::PointCloud2 filtered; pcl::toROSMsg(points,filtered);
     filtered.header=pending.header; filtered_pub_->publish(filtered);
     cloud_received_=pending.received; cloud_stamp_=pending.header.stamp; cloud_status_=0;
     pending_cloud_.reset();
-    if (!service_only_) replan();
+    replan();
   }
   // Pose is already in the planning frame. By Odometry convention, twist is in child_frame_id;
   // rotate its linear component using the pose orientation unless the producer explicitly uses world twist.
@@ -255,22 +270,78 @@ class Planner : public rclcpp::Node {
       if (blind_poses_.size()>kBlindPoseHistorySize) blind_poses_.pop_front();
     }
     processPendingCloud();
-    if (!service_only_) replan(false);
+    replan(false);
   }
-  // Goals persist until replaced; only position/frame are consumed, not orientation or timestamp.
-  // Every received goal advances the revision, including repeated coordinates and invalid requests.
+  /// Copy the actual core limits into every outcome, including skipped searches and geometry queries.
+  void fillDynamics(Result& result) const {
+    const auto& config=core_->config();
+    result.max_velocity_xy=std::min(config.max_vel,config.max_vel_xy);
+    result.max_velocity_z=std::min(config.max_vel,config.max_vel_z);
+    result.max_acceleration_xy=std::min(config.max_acc,config.max_acc_xy);
+    result.max_acceleration_z=std::min(config.max_acc,config.max_acc_z);
+  }
+  /// Publish only process identity when idle/near-goal; this never searches or changes curve validity.
+  void identityHeartbeat() {
+    const auto current=Clock::now();
+    if (std::chrono::duration<double>(current-last_result_publication_).count()<kIdentityHeartbeatSeconds) return;
+    Result result; result.header.stamp=now(); result.header.frame_id=frame_;
+    fillDynamics(result);
+    result.planner_session=planner_session_; result.sequence=++sequence_; result.goal_revision=goal_revision_;
+    result.status=Result::WAITING_FOR_INPUT; result.detail="planner identity heartbeat";
+    result.cloud_stamp=cloud_stamp_; result.odometry_stamp=odom_stamp_; result.map_points=core_->mapPointCount();
+    result_pub_->publish(result); last_result_publication_=current;
+  }
+  /// Reset execution history when replacing/cancelling a target, retaining both map banks.
+  void clearGoalHistory() {
+    core_->reset(); standalone_path_.clear(); successful_curve_valid_=false; curve_recovery_pending_=false; first_plan_=true; replan_flag_=false;
+    replan_index_=-1; last_replan_index_=-1; last_replan_time_=Clock::time_point{};
+    last_replan_position_=position_;
+  }
+  /// Set or cancel a persistent target; unchanged identity/position is idempotent.
+  void setGoal(const path_planning::srv::SetGoal::Request& request,
+               path_planning::srv::SetGoal::Response& response) {
+    response.planner_session=planner_session_; response.goal_revision=goal_revision_;
+    if (!request.active) {
+      if (goal_active_ && !request.target_id.empty() && request.target_id!=target_id_) {
+        response.detail="active target identity mismatch"; return;
+      }
+      if (goal_active_) {
+        ++goal_revision_; clearGoalHistory(); goal_active_=false; target_id_.clear();
+        goal_status_=Result::WAITING_FOR_INPUT;
+      }
+      response.accepted=true; response.goal_revision=goal_revision_; response.detail="target inactive";
+      return;
+    }
+    const Vector next=vec(request.goal);
+    if (!correctFrame(request.header) || !next.allFinite() || !core_->inBounds(next)) {
+      response.detail="invalid target frame or position"; return;
+    }
+    if (request.target_id.empty()) { response.detail="active target requires target_id"; return; }
+    if (goal_active_ && request.target_id==target_id_ && next==goal_) {
+      response.accepted=true; response.detail="target unchanged"; return;
+    }
+    ++goal_revision_; clearGoalHistory(); goal_=next; target_id_=request.target_id;
+    goal_active_=true; goal_status_=0;
+    response.accepted=true; response.goal_revision=goal_revision_; response.detail="target accepted";
+    if (!odom_status_) plan();
+  }
+  /// PoseStamped remains a complete manual command and receives a node-generated target identity.
   void goal(const geometry_msgs::msg::PoseStamped& m) {
-    ++goal_revision_;
-    if (!correctFrame(m.header)) { goal_status_=Result::FRAME_MISMATCH; return; }
-    goal_=vec(m.pose.position);
-    goal_status_=goal_.allFinite()?0:Result::INVALID_INPUT;
-    if (!service_only_ && !goal_status_ && !odom_status_) plan();
+    path_planning::srv::SetGoal::Request request;
+    request.header=m.header; request.goal=m.pose.position; request.active=true;
+    request.target_id="manual:"+planner_session_+":"+std::to_string(++manual_goal_sequence_);
+    path_planning::srv::SetGoal::Response response;
+    setGoal(request,response);
+    if (!response.accepted) RCLCPP_WARN(get_logger(),"Manual goal rejected: %s",response.detail.c_str());
   }
   // Time/distance refreshes use actual odometry; clouds also inspect the whole old path.
   // Keep a failed obstacle replan pending; only successful publication clears the flag.
   void replan(bool check_path=true) {
-    if (goal_status_ || odom_status_ || cloud_status_ || (goal_-position_).norm()<0.3 ||
+    if (!goal_active_ || goal_status_ || odom_status_ || cloud_status_ ||
+        (successful_curve_valid_ && (goal_-position_).norm()<kNearGoalDistanceMeters) ||
         !fresh(cloud_received_,cloud_stamp_) || !fresh(odom_received_,odom_stamp_)) return;
+    // Revoking a successful curve leaves one actual-state recovery attempt pending.
+    if (curve_recovery_pending_) { plan(true); return; }
     if (std::chrono::duration<double>(Clock::now()-last_replan_time_).count()>=replan_interval_ ||
         (position_-last_replan_position_).norm()>=replan_distance_) {
       plan(true);
@@ -307,6 +378,7 @@ class Planner : public rclcpp::Node {
       }
     }
     // Measure from each actual attempt, including failed searches, rather than timer callbacks.
+    curve_recovery_pending_=false;
     last_replan_time_=Clock::now(); last_replan_position_=position_;
     const auto result=executePlan(start,velocity,goal_,false);
     if (result.status==Result::REACH_END || result.status==Result::REACH_HORIZON) {
@@ -320,7 +392,9 @@ class Planner : public rclcpp::Node {
     // Readiness flags are internal: zero means valid input, not a published PlanResult status.
     // The first failing gate determines the reported reason; this is not an aggregate diagnostic.
     Result result; result.header.stamp=now(); result.header.frame_id=frame_;
+    fillDynamics(result);
     result.sequence=++sequence_; result.goal_revision=goal_revision_;
+    result.planner_session=planner_session_; result.target_id=requested?std::string{}:target_id_;
     result.cloud_stamp=cloud_stamp_; result.odometry_stamp=odom_stamp_;
     if (!requested && goal_status_) { result.status=goal_status_; result.detail="goal unavailable or invalid"; }
     else if (!requested && odom_status_) { result.status=odom_status_; result.detail="odometry unavailable or invalid"; }
@@ -398,6 +472,10 @@ class Planner : public rclcpp::Node {
       return fresh(cloud_received_,cloud_stamp_) && (requested || fresh(odom_received_,odom_stamp_));
     },within_budget);
     if (!requested) {
+      const bool success=result.status==Result::REACH_END || result.status==Result::REACH_HORIZON;
+      if (successful_curve_valid_ && !success) curve_recovery_pending_=true;
+      successful_curve_valid_=success;
+      last_result_publication_=Clock::now();
       result_pub_->publish(result);
       if (!path.poses.empty()) path_pub_->publish(path);
     }
@@ -410,7 +488,9 @@ class Planner : public rclcpp::Node {
     using Service=path_planning::srv::PlanMotion;
     processPendingCloud(); response.planner_session=planner_session_;
     auto& result=response.result;
+    fillDynamics(result);
     result.header.stamp=now(); result.header.frame_id=frame_; result.sequence=++sequence_;
+    result.planner_session=planner_session_; result.goal_revision=goal_revision_;
     result.cloud_stamp=cloud_stamp_; result.map_points=core_->mapPointCount();
     const auto received=Clock::now();
     // Service headers are ROS timestamps even when cloud headers use device/receive mode.
@@ -462,11 +542,12 @@ class Planner : public rclcpp::Node {
     result.map_points=core_->mapPointCount();
   }
   std::unique_ptr<KinodynamicAstar> core_;
-  std::string frame_,stamp_clock_,map_mode_,planner_session_,cloud_detail_="no cloud received";
-  bool service_only_=false;
-  bool first_plan_=true,replan_flag_=false;
+  std::string frame_,stamp_clock_,planner_session_,target_id_,cloud_detail_="no cloud received";
+  bool goal_active_=false;
+  bool first_plan_=true,replan_flag_=false,successful_curve_valid_=false,curve_recovery_pending_=false;
   double replan_interval_,replan_distance_;  // Seconds and metres between standalone attempts.
   Clock::time_point last_replan_time_{};
+  Clock::time_point last_result_publication_=Clock::now();  // Throttle identity-only heartbeats on the existing timer.
   Vector last_replan_position_=Vector::Zero();  // Actual odometry at the last planning attempt.
   int64_t replan_index_=-1,last_replan_index_=-1;
   std::vector<Vector> standalone_path_;  // Last successful ROS1 0.01-s check/index buffer.
@@ -486,7 +567,7 @@ class Planner : public rclcpp::Node {
   Clock::time_point cloud_received_,odom_received_;
   builtin_interfaces::msg::Time cloud_stamp_,odom_stamp_;
   uint8_t cloud_status_=Result::NO_MAP, odom_status_=Result::WAITING_FOR_INPUT, goal_status_=Result::WAITING_FOR_INPUT;
-  uint64_t sequence_=0,goal_revision_=0;
+  uint64_t sequence_=0,goal_revision_=0,manual_goal_sequence_=0;
   int64_t last_cloud_stamp_=0,last_odom_stamp_=0; bool have_cloud_stamp_=false,have_odom_stamp_=false;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
@@ -497,6 +578,7 @@ class Planner : public rclcpp::Node {
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr filtered_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::Service<path_planning::srv::PlanMotion>::SharedPtr motion_service_;
+  rclcpp::Service<path_planning::srv::SetGoal>::SharedPtr goal_service_;
 };
 int main(int argc,char** argv) {
   rclcpp::init(argc,argv);

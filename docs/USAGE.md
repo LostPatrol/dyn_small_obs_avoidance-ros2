@@ -241,24 +241,24 @@ ros2 topic echo /kino_path --once
 不会被launch固定覆盖；ROS时钟输入需配置 `stamp_clock: ros` 或显式传 `stamp_clock:=ros`。
 文件不可读或YAML语法/段结构错误时打印警告并回退，非法参数值仍由节点校验。不会启动传感器或飞控。
 
-任意规划参数可显式传入，例如 `search.safe_distance:=0.3`、`service_only:=true`、
-`map_mode:=dual_tree`、`'search.lower:=[-50,-50,-3]'`。短名 `blind_radius`/`map_mode`/`search_lower`
-分别对应 `cloud.blind_radius`/`cloud.map_mode`/`search.lower`，不要同时提供短名和完整名。
+任意规划参数可显式传入，例如 `search.safe_distance:=0.3`、
+`'search.lower:=[-50,-50,-3]'`。短名 `blind_radius`/`search_lower`
+分别对应 `cloud.blind_radius`/`search.lower`，不要同时提供短名和完整名。
 默认读取安装目录YAML；修改源码配置须重新构建，或 `config:=/绝对路径/planner.yaml`；生效需要重启。
 
-`path_planning` 段是公共参数；`/avoidance/path_planning` 段仅为桥模式选定
-`service_only: true`、`cloud.map_mode: latest_observation`。独立模式默认false/dual_tree。
-`odin_launch`/`planner_launch` 段配置输入话题，`avoidance_bridge` 段配置主工程桥。
-服务模式仍接收地图并提供PlanMotion，不再按独立goal或定时器发起规划。
-latest_observation替换收到的完整地图；dual_tree按有效点云帧在两棵KD树内累计，
-由 `search.tree_period` 控制轮换，历史淘汰并非按墙钟。latest_observation要求service_only=true。
+`path_planning` 段是公共参数，正式桥与手动入口使用相同原生目标/时间/位移/碰撞重规划。
+`odin_launch`/`planner_launch` 段配置输入话题，`avoidance_bridge` 段配置主工程桥基本接口。
+原生dual_tree按有效点云帧在两棵KD树内累计，由 `search.tree_period` 控制轮换，
+历史淘汰并非按墙钟。桥用SetGoal设置/取消持久目标，PlanMotion保留几何查询。
+规划动力学方向限额和目标身份见 [规划接口说明](../path_planning/README.md)。
 下界用于包含初始位置附近的地面台架起点，不代表真实地面高度或允许飞行空间。
 接收时间模式不能判断传感器端积压延迟。目标必须使用 `odom`；输出是 `/kino_path`，有下划线。
 状态 1/2 才含轨迹，3 表示无路；即使配置正确，起点附近的地面或机体点也可能使安全距离检查失败。
 不能通过缩小安全距离或删除近身障碍物来宣称台架规划成功。
 
 每次重启规划器都需要重新发目标：目标只保存在当前进程，不跨进程持久化。
-`status=9`、`goal_revision=0`、`detail="goal unavailable or invalid"` 表示本进程尚未收到目标。
+未设置或取消目标时保持idle，每秒发布一次status=9、空target_id的身份心跳；
+它只显示当前planner_session，不搜索、不包含轨迹。目标规划结果携带实际target_id。
 若RViz的Pose显示也订阅了目标，CLI `--once` 默认只等一个订阅者，不能据此确认规划器已收到。
 当前有RViz和规划器两个目标订阅者时，使用 `--once -w 2 --keep-alive 3` 等双方匹配后发送；
 没有RViz目标订阅时用 `-w 1`。发送后确认PlanResult的goal_revision递增；

@@ -106,7 +106,9 @@ class PlannerProbe:
         for _ in range(observations):
             self.observe(points=points, position=position)
         self.spin(.35)  # Includes several diagnostic timer periods while inputs remain fresh.
-        assert (len(self.results), len(self.paths)) == before, [
+        assert len(self.paths) == before[1]
+        assert all(not r.target_id and r.status == r.WAITING_FOR_INPUT and r.planning_ms == 0
+                   for r in self.results[before[0]:]), [
             (r.status, r.detail, r.planning_ms) for r in self.results[before[0]:]]
 
 
@@ -123,8 +125,11 @@ def planner(tmp_path, request):
             exe, '--ros-args', '-p', 'planning_frame:=map', '-p', 'input_timeout:=2.0',
             '-p', 'stamp_clock:=receive', '-p', 'cloud.blind_radius:=0.0',
             '-p', 'search.tree_period:=1', '-p', 'search.safe_distance:=0.25',
-            # Match the deployed YAML budget; the library's 0.08 s default times out on ARM64.
+            # Explicit legacy test envelope keeps event/collision scenes independent of default tuning.
             '-p', 'search.search_budget:=0.3',
+            '-p', 'search.max_vel:=2.0', '-p', 'search.max_acc:=2.0',
+            '-p', 'search.max_vel_xy:=2.82842712474619',
+            '-p', 'search.max_acc_xy:=2.82842712474619',
             '-p', 'search.voxel_size:=0.1', '-p', 'sample_step:=0.02',
             '-r', 'time_index:=/demo_node/trajectory_time_index',
         ] + arguments, stdout=log, stderr=log)
@@ -233,41 +238,23 @@ def test_initial_failure_needs_another_goal_event(planner):
     p.quiet()
 
 
-def test_external_index_throttle_and_invalid_indices(planner):
-    """Only a valid executor-index advance of at least ten samples permits another attempt."""
+def test_new_goal_clears_execution_index_and_old_path(planner):
+    """A new target cannot use the preceding target's index or cached path as its start."""
     p = planner
     p.observe()
     first = len(p.results)
     p.goal()
     initial = p.outcome(first, PlanResult.REACH_END)
-    p.spin()
-
-    p.index(0)  # Previous index is -1, so the absolute difference is below ten.
-    first, path_count = len(p.results), len(p.paths)
-    p.goal()
-    p.quiet(observations=2)
-    assert len(p.results) == first and len(p.paths) == path_count
-
-    p.index(10)
-    p.goal()
-    advanced = p.outcome(first, PlanResult.REACH_END)
-    assert advanced.goal_revision == initial.goal_revision + 2
-    # The legacy index+3 position comes from the 0.01 s cache, although public output is 0.02 s.
-    samples = legacy_samples(initial)
-    expected = samples[13]
-    actual = advanced.trajectory.points[0].transforms[0].translation
-    assert (actual.x, actual.y, actual.z) == pytest.approx(expected, abs=1e-9)
-    expected_velocity = tuple((after-before)/.04 for before, after in zip(samples[11], samples[15]))
-    velocity = advanced.trajectory.points[0].velocities[0].linear
-    assert (velocity.x, velocity.y, velocity.z) == pytest.approx(expected_velocity, abs=1e-9)
-    p.spin()
-
-    first, path_count = len(p.results), len(p.paths)
-    for index in (15, -2, 1000000, 2**63-1):
+    for index in (0, 10, -2, 1000000, 2**63-1):
         p.index(index)
-        p.goal()
+        first = len(p.results)
+        p.goal(x=3.5)
+        changed = p.outcome(first, PlanResult.REACH_END)
+        assert changed.goal_revision > initial.goal_revision
+        assert changed.target_id != initial.target_id
+        actual = changed.trajectory.points[0].transforms[0].translation
+        assert (actual.x, actual.y, actual.z) == pytest.approx((0., 0., 1.))
         p.quiet(observations=1)
-        assert len(p.results) == first and len(p.paths) == path_count
 
 
 @pytest.mark.parametrize('planner', [None], indirect=True)
@@ -337,3 +324,148 @@ def test_elapsed_refresh_shortens_path_after_obstacle_disappears(planner):
     assert refreshed.goal_revision == detour.goal_revision
     assert all(abs(t.transforms[0].translation.y) < 1e-6 and
                abs(t.transforms[0].translation.z-1.) < 1e-6 for t in refreshed.trajectory.points)
+
+@pytest.mark.parametrize('planner', [{'replan_interval': .2,
+                                     'search.max_vel': 1., 'search.max_acc': 2.,
+                                     'search.max_vel_xy': 1., 'search.max_vel_z': .2,
+                                     'search.max_acc_xy': 2., 'search.max_acc_z': 2.}], indirect=True)
+def test_set_goal_identity_idempotence_cancel_and_native_limits(planner):
+    """Native lifecycle shares map/timer planning and carries exact target identities."""
+    from path_planning.srv import SetGoal, PlanMotion
+    p = planner
+    client = p.node.create_client(SetGoal, 'set_goal')
+    motion = p.node.create_client(PlanMotion, 'plan_motion')
+    assert client.wait_for_service(timeout_sec=5)
+    assert motion.wait_for_service(timeout_sec=5)
+
+    def call(target_id='bridge-a', active=True, goal=(3., .5, 2.4)):
+        """Send one lifecycle request and return the authoritative acknowledgement."""
+        request = SetGoal.Request()
+        request.header.frame_id = 'map'
+        request.target_id, request.active = target_id, active
+        request.goal.x, request.goal.y, request.goal.z = goal
+        future = client.call_async(request)
+        p.wait(future.done)
+        return future.result()
+
+    p.observe()
+    p.wait(lambda: bool(p.results))  # Wait for the one-second idle identity heartbeat.
+    assert all(not r.target_id and r.planning_ms == 0 for r in p.results)  # Identity only while idle.
+    assert p.results and all((r.max_velocity_xy, r.max_velocity_z,
+                             r.max_acceleration_xy, r.max_acceleration_z) == (1., .2, 2., 2.)
+                            for r in p.results)
+    accepted = call()
+    assert accepted.accepted and accepted.planner_session
+    planned = p.outcome(0, PlanResult.REACH_END)
+    assert planned.target_id == 'bridge-a'
+    assert planned.planner_session == accepted.planner_session
+    assert planned.goal_revision == accepted.goal_revision
+    for point in planned.trajectory.points:
+        v, a = point.velocities[0].linear, point.accelerations[0].linear
+        assert math.hypot(v.x, v.y) <= 1.+1e-8 and abs(v.z) <= .2+1e-8
+        assert math.hypot(a.x, a.y) <= 2.+1e-8 and abs(a.z) <= 2.+1e-8
+    assert (planned.max_velocity_xy, planned.max_velocity_z,
+            planned.max_acceleration_xy, planned.max_acceleration_z) == (1., .2, 2., 2.)
+    duration = sum(s.duration for s in planned.segments)
+    final_time = planned.trajectory.points[-1].time_from_start
+    assert abs(final_time.sec + final_time.nanosec*1e-9-duration) < 1e-8
+    assert any(s.z[2] != 0 or s.z[3] != 0 for s in planned.segments)  # Native Z acceleration.
+    unchanged = call()
+    assert unchanged.accepted and unchanged.goal_revision == accepted.goal_revision
+    refused = call(target_id='bridge-other', active=False)
+    assert not refused.accepted and refused.goal_revision == accepted.goal_revision
+
+    # Geometry inspection keeps the autonomous target identity/revision intact.
+    request = PlanMotion.Request()
+    request.header = Header(frame_id='map', stamp=p.node.get_clock().now().to_msg())
+    request.mode = PlanMotion.Request.CHECK_LINE
+    request.start.z = request.goal.z = 1.
+    request.goal.x = .5
+    future = motion.call_async(request)
+    p.wait(future.done)
+    result = future.result().result
+    assert result.status == PlanResult.REACH_END and result.planner_session == accepted.planner_session
+    assert not result.target_id
+    assert (result.max_velocity_xy, result.max_velocity_z,
+            result.max_acceleration_xy, result.max_acceleration_z) == (1., .2, 2., 2.)
+    still_same = call()
+    assert still_same.goal_revision == accepted.goal_revision
+
+    cancelled = call(active=False)
+    assert cancelled.accepted and cancelled.goal_revision == accepted.goal_revision+1
+    p.spin(.1)
+    before = len(p.results)
+    p.observe(); p.spin(.5)
+    assert all(not r.target_id and r.planning_ms == 0 for r in p.results[before:])
+    assert call(active=False).goal_revision == cancelled.goal_revision
+    next_goal = call(target_id='bridge-b', goal=(.5, 0., 1.))
+    assert next_goal.accepted and next_goal.goal_revision == cancelled.goal_revision+1
+    changed = p.outcome(before, PlanResult.REACH_END)
+    assert changed.target_id == 'bridge-b' and changed.map_points > 0
+
+
+@pytest.mark.parametrize('planner', [{'replan_interval': 60., 'replan_distance': 100.}], indirect=True)
+def test_near_goal_fault_recovery_without_resetting_goal(planner):
+    """A short input fault cannot leave a near-goal target permanently without an executable curve."""
+    from path_planning.srv import SetGoal
+    p = planner
+    client = p.node.create_client(SetGoal, 'set_goal')
+    assert client.wait_for_service(timeout_sec=5)
+    p.observe()
+    request = SetGoal.Request()
+    request.header.frame_id = 'map'; request.target_id = 'near-goal'; request.active = True
+    request.goal.x = .2; request.goal.z = 1.
+    future = client.call_async(request); p.wait(future.done)
+    accepted = future.result()
+    initial = p.outcome(0, PlanResult.REACH_END)
+    assert initial.goal_revision == accepted.goal_revision
+    first = len(p.results)
+    p.spin(1.1)
+    heartbeats = [r for r in p.results[first:] if not r.target_id]
+    assert heartbeats and all(r.status == r.WAITING_FOR_INPUT and r.planning_ms == 0
+                              and not r.segments for r in heartbeats)
+    # A bad cloud frame revokes the successful curve through an ordinary diagnostic result.
+    header = Header(frame_id='wrong', stamp=p.node.get_clock().now().to_msg())
+    first = len(p.results)
+    p.clouds.publish(create_cloud_xyz32(header, [(-20., -20., 1.)]))
+    failed = p.outcome(first, PlanResult.FRAME_MISMATCH)
+    assert failed.target_id == request.target_id and not failed.segments
+    first = len(p.results)
+    p.observe(position=(.02, 0., 1.))
+    recovered = p.outcome(first, PlanResult.REACH_END)
+    assert recovered.goal_revision == accepted.goal_revision
+    assert recovered.trajectory.points[0].transforms[0].translation.x == pytest.approx(.02)
+    first = len(p.results)
+    for _ in range(3):
+        future = client.call_async(request); p.wait(future.done)
+        assert future.result().goal_revision == accepted.goal_revision
+    p.spin(.3)
+    assert not any(r.target_id and r.planning_ms > 0 for r in p.results[first:])
+
+
+def test_idle_heartbeat_exposes_native_restart_session(planner):
+    """A restarted idle native node exposes its new session without searching or a fresh goal."""
+    p = planner
+    p.wait(lambda: any(not r.target_id and r.status == r.WAITING_FOR_INPUT for r in p.results))
+    old = p.results[-1]
+    assert old.planner_session and old.planning_ms == 0 and not old.segments
+    p.spin(1.1)
+    newer = p.results[-1]
+    assert newer.sequence > old.sequence and newer.planner_session == old.planner_session
+    first = len(p.results)
+    original = p.proc
+    original.send_signal(signal.SIGINT); original.wait(timeout=5)
+    restart_log = p.log_path.with_name('restarted.log')
+    with restart_log.open('w') as log:
+        restarted = subprocess.Popen(original.args, stdout=log, stderr=log)
+        p.proc = restarted
+        try:
+            p.wait(lambda: any(r.planner_session != old.planner_session for r in p.results[first:]))
+            heartbeat = next(r for r in p.results[first:] if r.planner_session != old.planner_session)
+            assert heartbeat.status == PlanResult.WAITING_FOR_INPUT and not heartbeat.target_id
+            assert heartbeat.planning_ms == 0 and not heartbeat.segments and not heartbeat.trajectory.points
+            assert heartbeat.header.stamp.sec >= old.header.stamp.sec
+        finally:
+            restarted.send_signal(signal.SIGINT); restarted.wait(timeout=5)
+            p.proc = original
+    assert restarted.returncode in (0, -signal.SIGINT), restart_log.read_text()

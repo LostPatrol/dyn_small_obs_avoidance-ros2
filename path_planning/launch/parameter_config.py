@@ -6,15 +6,14 @@ import yaml
 # Planner wrapper parameters without the search/cloud/output namespace prefixes.
 PLANNER_KEYS = {
     'planning_frame', 'planning_rate', 'replan_interval', 'replan_distance',
-    'input_timeout', 'stamp_clock', 'odometry_twist_in_body', 'sample_step', 'service_only',
+    'input_timeout', 'stamp_clock', 'odometry_twist_in_body', 'sample_step',
 }
 # Integer-valued ROS parameters must not be coerced to doubles.
 INTEGER_KEYS = {
     'search.allocate_num', 'search.tree_period', 'search.max_cloud_points', 'output.max_samples',
 }
 # Preserve the existing short launch arguments while also accepting ROS parameter names.
-ALIASES = {'blind_radius': 'cloud.blind_radius', 'map_mode': 'cloud.map_mode',
-           'search_lower': 'search.lower'}
+ALIASES = {'blind_radius': 'cloud.blind_radius', 'map_mode': 'cloud.map_mode', 'search_lower': 'search.lower'}
 
 
 def load_config(path):
@@ -72,7 +71,7 @@ def planner_overrides(context, parameters):
         value = yaml.safe_load(raw)
         if name in ('planning_frame', 'stamp_clock', 'cloud.map_mode'):
             value = raw
-        elif name in ('service_only', 'odometry_twist_in_body'):
+        elif name in ('odometry_twist_in_body',):
             if not isinstance(value, bool):
                 raise ValueError(f'{key} must be true or false')
         elif name in INTEGER_KEYS:
@@ -83,6 +82,13 @@ def planner_overrides(context, parameters):
         else:
             value = float(value)
         result[name] = value
+    # An explicit scalar CLI argument supersedes YAML directional defaults, while an explicit
+    # directional CLI argument is more specific and wins for its own direction.
+    for scalar in ('search.max_vel', 'search.max_acc'):
+        if arguments.get(scalar):
+            for suffix in ('_xy', '_z'):
+                if not arguments.get(scalar+suffix):
+                    result[scalar+suffix] = result[scalar]
     return result
 
 

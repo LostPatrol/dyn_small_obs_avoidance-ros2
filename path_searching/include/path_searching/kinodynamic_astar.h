@@ -12,11 +12,13 @@
 #include <vector>
 
 /// Search and obstacle-map configuration in SI units.
-/// Limits are per axis, not Euclidean norms. Bounds do not imply observed free space.
+/// Horizontal limits are vector norms; vertical and legacy scalar limits are absolute bounds.
 /// The constructor copies this configuration; changing the caller's copy has no effect.
 struct SearchConfig {
   // Primitive duration (s), initial fixed-acceleration duration (s), velocity (m/s), acceleration (m/s²).
-  double max_tau = 0.6, init_max_tau = 0.8, max_vel = 2.0, max_acc = 2.0;
+  double max_tau = 0.6, init_max_tau = 0.8, max_vel = 1.0, max_acc = 2.0;
+  // Horizontal vector norm and vertical absolute limits (m/s and m/s²). Scalar caps also apply.
+  double max_vel_xy = 1.0, max_vel_z = 0.2, max_acc_xy = 2.0, max_acc_z = 2.0;
   // Cost integrates squared acceleration + w_time; horizon is displacement from start (m).
   // lambda_heu weights the upstream heuristic, so global optimality is not guaranteed.
   double w_time = 10.0, horizon = 100.0, lambda_heu = 5.0;
@@ -25,14 +27,14 @@ struct SearchConfig {
   // Clearance (m), voxel edge (m), terminal-shot collision-sampling travel interval (m).
   // Ordinary primitives certify endpoint clearance margins against an arc-length bound.
   // Match ROS1: reject distances strictly below safe_distance, without voxel/sampling inflation.
-  double safe_distance = 0.45, voxel_size = 0.1, collision_step = 0.05;
-  double search_budget = 0.08;  // steady-clock seconds per search, excludes map construction
+  double safe_distance = 0.25, voxel_size = 0.1, collision_step = 0.05;
+  double search_budget = 0.3;  // steady-clock seconds per search, excludes map construction
   // Node-pool capacity; valid cloud updates per bank before alternating to the other tree.
   int allocate_num = 100000, tree_period = 20;
   // Limit for a single input cloud and the sum of both filtered banks; overflow invalidates the map.
   std::size_t max_cloud_points = 500000;
   // Inclusive world-frame position bounds (m), shared by primitives and terminal curves.
-  Eigen::Vector3d lower{-50.0, -50.0, 0.2}, upper{50.0, 50.0, 10.0};
+  Eigen::Vector3d lower{-50.0, -50.0, -2.0}, upper{50.0, 50.0, 10.0};
   /// Throws std::invalid_argument for invalid/unrepresentable numeric values, bounds or resource limits.
   void validate() const;
 };
@@ -195,6 +197,9 @@ class KinodynamicAstar {
   void retrievePath(PathNodePtr node);
   std::vector<double> cubic(double a, double b, double c, double d);
   std::vector<double> quartic(double a, double b, double c, double d, double e);
+  /// Check both directional envelope and legacy per-axis caps.
+  bool withinVelocity(const Eigen::Vector3d& value) const;
+  bool withinAcceleration(const Eigen::Vector3d& value) const;
   bool computeShotTraj(Eigen::VectorXd start, Eigen::VectorXd end, double duration);
   double estimateHeuristic(Eigen::VectorXd start, Eigen::VectorXd end, double& duration);
   void stateTransit(Eigen::Matrix<double, 6, 1>& start, Eigen::Matrix<double, 6, 1>& end,

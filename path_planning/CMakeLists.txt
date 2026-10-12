@@ -16,7 +16,7 @@ find_package(std_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/PolynomialSegment.msg" "msg/PlanResult.msg" "srv/PlanMotion.srv"
+  "msg/PolynomialSegment.msg" "msg/PlanResult.msg" "srv/PlanMotion.srv" "srv/SetGoal.srv"
   DEPENDENCIES std_msgs builtin_interfaces trajectory_msgs geometry_msgs)
 add_executable(path_planning_node src/path_planning.cpp)
 target_compile_features(path_planning_node PRIVATE cxx_std_17)

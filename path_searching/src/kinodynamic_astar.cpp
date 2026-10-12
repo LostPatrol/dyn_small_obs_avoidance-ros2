@@ -28,7 +28,7 @@ constexpr double kNearestDistanceSlack = 8 * std::numeric_limits<float>::epsilon
 }  // namespace
 
 void SearchConfig::validate() const {
-  for (double v : {max_tau, init_max_tau, max_vel, max_acc, w_time, horizon, lambda_heu,
+  for (double v : {max_tau, init_max_tau, max_vel, max_acc, max_vel_xy, max_vel_z, max_acc_xy, max_acc_z, w_time, horizon, lambda_heu,
                    resolution, time_resolution, safe_distance, voxel_size, collision_step, search_budget})
     if (!std::isfinite(v) || v <= 0) throw std::invalid_argument("search parameters must be finite and positive");
   // Check operations needed by the fixed lattice and double-integrator before search allocation.
@@ -159,8 +159,9 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
   if (!start_pt.allFinite() || !start_v.allFinite() || !start_a.allFinite() ||
       !end_pt.allFinite() || !end_v.allFinite() || !std::isfinite(time_start) ||
       !inBounds(start_pt) || !inBounds(end_pt) ||
-      start_v.cwiseAbs().maxCoeff() > max_vel_ || end_v.cwiseAbs().maxCoeff() > max_vel_ ||
-      start_a.cwiseAbs().maxCoeff() > max_acc_) return INVALID_INPUT;
+      start_v.cwiseAbs().maxCoeff()>max_vel_ || end_v.cwiseAbs().maxCoeff()>max_vel_ ||
+      start_a.cwiseAbs().maxCoeff()>max_acc_ ||
+      !withinVelocity(start_v) || !withinVelocity(end_v) || !withinAcceleration(start_a)) return INVALID_INPUT;
   if (!map_ready_) return NO_MAP;
   if (!isSafe(start_pt.x(), start_pt.y(), start_pt.z()) ||
       !isSafe(end_pt.x(), end_pt.y(), end_pt.z())) return NO_PATH;
@@ -271,7 +272,8 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
     inputs.reserve(init_search ? 1 : 125);
     durations.reserve(init_search ? kInitialDurationCount : 1);
     // Initial mode preserves supplied acceleration only for this first expansion.
-    // Otherwise each axis samples five accelerations in [-max_acc_, max_acc_].
+    // Preserve five samples per axis, with directional acceleration bounds.
+    const bool initial_expansion=init_search;
     if (init_search)
     {
       inputs.push_back(start_acc_);
@@ -281,10 +283,21 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
     }
     else
     {
-      const std::array<double, 5> accelerations{-max_acc_, -max_acc_ / 2, 0, max_acc_ / 2, max_acc_};
-      for (double ax : accelerations)
-        for (double ay : accelerations)
-          for (double az : accelerations)
+      std::array<std::array<double, 5>, 3> axes;
+      for (int axis=0; axis<3; ++axis) {
+        const double acceleration=std::min(max_acc_,axis==2?config_.max_acc_z:config_.max_acc_xy);
+        const double velocity=std::min(max_vel_,axis==2?config_.max_vel_z:config_.max_vel_xy);
+        axes[axis]={-acceleration,-acceleration/2,0,acceleration/2,acceleration};
+        // Preserve the original lattice unless even half acceleration from rest exceeds
+        // the speed cap. Such narrow axes need feasible samples to retain nonzero controls.
+        if (acceleration*max_tau_/2<=velocity) continue;
+        const double negative=std::min(acceleration,std::max(0.0,(velocity+cur_state(axis+3))/max_tau_));
+        const double positive=std::min(acceleration,std::max(0.0,(velocity-cur_state(axis+3))/max_tau_));
+        axes[axis]={-negative,-negative/2,0,positive/2,positive};
+      }
+      for (double ax : axes[0])
+        for (double ay : axes[1])
+          for (double az : axes[2])
           {
             um << ax, ay, az;
             inputs.push_back(um);
@@ -296,7 +309,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
       {
         um = inputs[i];
         if (std::chrono::steady_clock::now() >= deadline_) { reset(); return TIMEOUT; }
-        if (!um.allFinite() || um.cwiseAbs().maxCoeff() > max_acc_) continue;
+        if (!um.allFinite() || !withinAcceleration(um)) continue;
         double tau = durations[j];
         stateTransit(cur_state, pro_state, um, tau);
         pro_t = cur_node->time + tau;
@@ -324,19 +337,24 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
         Eigen::Vector3i pro_id = posToIndex(pro_pos);
 
         int pro_t_id = dynamic ? timeToIndex(pro_t) : 0;
-        PathNodePtr pro_node = dynamic ? expanded_nodes_.find(pro_id, pro_t_id) : expanded_nodes_.find(pro_id);
+        // A short initial coast may stay in the root cell while being a valid prefix before
+        // free acceleration. Keep these first-step candidates outside the spatial hash: merging
+        // them with the closed root forces long coasts that rolling replans can endlessly defer.
+        const bool initial_same_cell=initial_expansion && !dynamic && pro_id==cur_node->index;
+        PathNodePtr pro_node = initial_same_cell ? nullptr :
+            (dynamic ? expanded_nodes_.find(pro_id, pro_t_id) : expanded_nodes_.find(pro_id));
         if (pro_node != NULL && pro_node->node_state == IN_CLOSE_SET)
         {
             continue;
         }
         Eigen::Vector3d pro_v = pro_state.tail(3);
-        if (fabs(pro_v(0)) > max_vel_ || fabs(pro_v(1)) > max_vel_ || fabs(pro_v(2)) > max_vel_)
+        if (!withinVelocity(pro_v))
         {
             continue;
         }
         Eigen::Vector3i diff = pro_id - cur_node->index;
         int diff_time = pro_t_id - cur_node->time_idx;
-        if (diff.norm() == 0 && ((!dynamic) || diff_time == 0))
+        if (!initial_same_cell && diff.norm() == 0 && ((!dynamic) || diff_time == 0))
         {
             continue;
         }
@@ -396,10 +414,10 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
 
             if (dynamic)
               expanded_nodes_.insert(pro_id, pro_node->time_idx, pro_node);
-            else
+            else if (!initial_same_cell)
               expanded_nodes_.insert(pro_id, pro_node);
 
-            tmp_expand_nodes.push_back(pro_node);
+            if (!initial_same_cell) tmp_expand_nodes.push_back(pro_node);
 
             use_node_num_ += 1;
 
@@ -460,8 +478,9 @@ double KinodynamicAstar::estimateHeuristic(Eigen::VectorXd x1, Eigen::VectorXd x
 
   std::vector<double> ts = quartic(c5, c4, c3, c2, c1);
 
-  double v_max = max_vel_ * kHeuristicVelocityFraction;
-  double t_bar = std::max(kMinHeuristicTimeSeconds, (x1.head(3) - x2.head(3)).lpNorm<Infinity>() / v_max);
+  const double horizontal=std::min(max_vel_,config_.max_vel_xy)*kHeuristicVelocityFraction;
+  const double vertical=std::min(max_vel_,config_.max_vel_z)*kHeuristicVelocityFraction;
+  double t_bar = std::max({kMinHeuristicTimeSeconds, dp.head<2>().norm()/horizontal, std::abs(dp.z())/vertical});
   ts.push_back(t_bar);
 
   double cost = kInitialHeuristicCost;
@@ -484,6 +503,20 @@ double KinodynamicAstar::estimateHeuristic(Eigen::VectorXd x1, Eigen::VectorXd x
   return 1.0 * (1 + tie_breaker_) * cost;
 }
 
+// Linear primitive velocity has a convex norm, so endpoint checks cover its entire duration.
+bool KinodynamicAstar::withinVelocity(const Eigen::Vector3d& value) const {
+  return value.cwiseAbs().maxCoeff()<=max_vel_+kDerivativeLimitSlack &&
+      value.head<2>().norm()<=config_.max_vel_xy+kDerivativeLimitSlack &&
+      std::abs(value.z())<=config_.max_vel_z+kDerivativeLimitSlack;
+}
+
+// Constant primitive or linear shot acceleration is bounded by its endpoint norms.
+bool KinodynamicAstar::withinAcceleration(const Eigen::Vector3d& value) const {
+  return value.cwiseAbs().maxCoeff()<=max_acc_+kDerivativeLimitSlack &&
+      value.head<2>().norm()<=config_.max_acc_xy+kDerivativeLimitSlack &&
+      std::abs(value.z())<=config_.max_acc_z+kDerivativeLimitSlack;
+}
+
 // Solve cubic coefficients from endpoint position/velocity. Only a fully checked shot is retained.
 bool KinodynamicAstar::computeShotTraj(Eigen::VectorXd state1, Eigen::VectorXd state2, double time_to_goal)
 {
@@ -504,7 +537,18 @@ bool KinodynamicAstar::computeShotTraj(Eigen::VectorXd state1, Eigen::VectorXd s
   Vector3d d = p0;
   coef.col(3) = a, coef.col(2) = b, coef.col(1) = c, coef.col(0) = d;
 
-  // Exact extrema: acceleration is linear, velocity quadratic, position cubic.
+  if (!coef.allFinite()) return false;
+  if (!withinAcceleration(2*b) || !withinAcceleration(2*b+6*a*t_d)) return false;
+  // Horizontal speed extrema solve d(||v_xy||²)/dt=0, a cubic.
+  // Normalize time to [0,1] so root degeneracy is independent of curve duration.
+  const Eigen::Vector2d q0=c.head<2>(), q1=2*b.head<2>()*t_d, q2=3*a.head<2>()*t_d*t_d;
+  auto speed_times=cubic(2*q2.squaredNorm(), 3*q1.dot(q2),
+                         q1.squaredNorm()+2*q0.dot(q2), q0.dot(q1));
+  speed_times.push_back(0); speed_times.push_back(1);
+  for (double u:speed_times) {
+    if (u>=0 && u<=1 && !withinVelocity(c+2*b*(u*t_d)+3*a*(u*t_d)*(u*t_d))) return false;
+  }
+  // Vertical/per-axis velocity and position extrema remain analytic.
   for (int axis = 0; axis < 3; ++axis) {
     const auto position = [&](double t) { return d(axis) + c(axis)*t + b(axis)*t*t + a(axis)*t*t*t; };
     const auto velocity = [&](double t) { return c(axis) + 2*b(axis)*t + 3*a(axis)*t*t; };
@@ -513,7 +557,7 @@ bool KinodynamicAstar::computeShotTraj(Eigen::VectorXd state1, Eigen::VectorXd s
     std::vector<double> velocity_times{0.0, t_d};
     if (std::abs(a(axis)) > kPolynomialZeroTolerance) velocity_times.push_back(-b(axis)/(3*a(axis)));
     for (double t : velocity_times)
-      if (t >= 0 && t <= t_d && std::abs(velocity(t)) > max_vel_ + kDerivativeLimitSlack) return false;
+      if (t >= 0 && t <= t_d && std::abs(velocity(t)) > std::min(max_vel_,axis==2?config_.max_vel_z:config_.max_vel_xy) + kDerivativeLimitSlack) return false;
     std::vector<double> position_times{0.0, t_d};
     if (std::abs(a(axis)) > kPolynomialZeroTolerance) {
       const double disc = 4*b(axis)*b(axis)-12*a(axis)*c(axis);
@@ -526,7 +570,7 @@ bool KinodynamicAstar::computeShotTraj(Eigen::VectorXd state1, Eigen::VectorXd s
       if (t >= 0 && t <= t_d && (position(t) < config_.lower(axis) || position(t) > config_.upper(axis)))
         return false;
   }
-  const double check_count = std::ceil(t_d * std::sqrt(3.0) * max_vel_ / config_.collision_step);
+  const double check_count = std::ceil(t_d * std::hypot(config_.max_vel_xy,config_.max_vel_z) / config_.collision_step);
   // A heuristic shot can be much longer than a configured primitive; avoid undefined int casts.
   if (!coef.allFinite() || !std::isfinite(check_count) || check_count >= std::numeric_limits<int>::max())
     return false;
@@ -543,11 +587,22 @@ bool KinodynamicAstar::computeShotTraj(Eigen::VectorXd state1, Eigen::VectorXd s
   return true;
 }
 
-// Upstream real-root helper for the quartic resolvent; internal callers supply nonzero a.
+// Real polynomial roots; reduced-degree branches also support horizontal speed extrema.
 vector<double> KinodynamicAstar::cubic(double a, double b, double c, double d)
 {
   vector<double> dts;
-
+  if (std::abs(a)<kPolynomialZeroTolerance) {
+    if (std::abs(b)<kPolynomialZeroTolerance) {
+      if (std::abs(c)>=kPolynomialZeroTolerance) dts.push_back(-d/c);
+    } else {
+      const double discriminant=c*c-4*b*d;
+      if (discriminant>=0) {
+        dts.push_back((-c+std::sqrt(discriminant))/(2*b));
+        dts.push_back((-c-std::sqrt(discriminant))/(2*b));
+      }
+    }
+    return dts;
+  }
   double a2 = b / a;
   double a1 = c / a;
   double a0 = d / a;

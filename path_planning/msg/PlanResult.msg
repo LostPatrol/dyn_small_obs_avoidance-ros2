@@ -16,6 +16,9 @@ uint8 STALE_INPUT=10
 uint8 FRAME_MISMATCH=11
 # Planning-attempt start time in the ROS clock and the common world frame.
 std_msgs/Header header
+# Native target identity; service geometry/PLAN queries have an empty target_id.
+string planner_session
+string target_id
 # Per-process counters; both restart from zero when the node restarts (not global session IDs).
 uint64 sequence
 uint64 goal_revision
@@ -28,6 +31,12 @@ uint8 status
 string detail
 # Search wall time in milliseconds; excludes map building/output conversion. Zero if search was skipped.
 float64 planning_ms
+# Effective native directional limits, shared with execution even for errors/identity heartbeats.
+# Horizontal values are vector norms; vertical values are absolute bounds, in SI units.
+float64 max_velocity_xy
+float64 max_velocity_z
+float64 max_acceleration_xy
+float64 max_acceleration_z
 # Sum of filtered points in both map banks, possibly including cross-bank duplicates.
 uint64 map_points
 # Exact, ordered polynomial segments; each segment uses its own local time starting at zero.

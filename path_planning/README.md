@@ -1,4 +1,4 @@
-<!-- Standalone event/time/distance replanning and Task38 service adapter. -->
+<!-- Shared native autonomous planning, target lifecycle and geometric query services. -->
 # 规划服务适配
 
 `path_planning_node` 现在额外提供相对命名服务 `plan_motion`（`path_planning/srv/PlanMotion`）。
@@ -6,9 +6,9 @@
 p/v/a，不修改搜索、碰撞检查或动力学参数。请求由控制权威提供，不需要另外发布目标或里程计。
 服务请求时间戳使用 ROS 时间；点云仍按现场 `stamp_clock` 参数校验。
 
-默认 `service_only=false`、`cloud.map_mode=dual_tree`。独立入口保留 ROS1 事件重规划：
+所有入口共用原生双树地图和 ROS1 事件重规划：
 目标到达且起点已就绪时规划；点云更新后按旧路径每40点检查，不安全才重规划。
-实际起点距目标小于0.3m时跳过点云重规划；失败保留重规划标记和旧路径，成功才清标记。
+实际起点距目标小于0.3m且成功曲线仍有效时跳过点云重规划；失败保留重规划标记和旧路径，成功才清标记。
 此外，距上次规划尝试经过 `replan_interval` 秒（默认0.2秒，名义5Hz），或实际三维位置变化达到
 `replan_distance` 米（默认1米），也会重规划。参数位于 `config/planner.yaml`，修改后重启。
 这两种触发从实际里程计位置/速度规划，不受执行索引节流限制；每次实际尝试（包括失败）
@@ -23,16 +23,34 @@ p/v/a，不修改搜索、碰撞检查或动力学参数。请求由控制权威
 整条含shot轨迹仍不提供连续净空证明。修改核心检查应从
 `path_searching/src/kinodynamic_astar.cpp` 的 `isPrimitiveSafe()` 入手。
 
-正式集成设置 `service_only=true`，仅响应显式服务请求；
-可同时设置 `cloud.map_mode=latest_observation`，由桥提供完整占用快照，每次在 wrapper 中
-`clearMap()` 后 `setKdtree()`，防止已由桥退役的障碍继续残留。此模式要求 service-only，
-只改变桥快照适配；核心文件、独立算法入口和 YAML 无额外算法替换。
+正式桥通过 `set_goal`（`SetGoal`）设置或取消持久目标；无需循环发送 PLAN。
+请求字段为 `header/goal/target_id/active`；响应字段为
+`accepted/planner_session/goal_revision/detail`。设置时目标ID非空且frame/位置合法；
+同ID同坐标幂等。取消时非空ID必须匹配活跃目标；保留地图，停止目标搜索；现有timer每秒发一次空target_id身份心跳(status=9)，不搜索。
+手动 `goal` 的 PoseStamped 走同一逻辑，由节点为每次命令分配自己的ID。
+换目标清空旧路径和执行索引；每条原生PlanResult携带进程session与目标ID。
+成功曲线被输入故障/失败撤销后，输入恢复触发一次实际状态规划，不受近目标早退或旧索引限制；
+幂等SetGoal不触发搜索。近目标仍有效时可发空ID身份心跳，不作为新目标/执行曲线。
+
+避障水平速度/加速度范数默认为1.0 m/s、2.0 m/s²，垂直绝对限额为0.2 m/s、2.0 m/s²。
+恒加速度原语在端点检查速度范数，末端shot解析检查水平速度范数的极值，
+两者均检查加速度范数/垂直限额，保持原持续时间，不依赖执行层retime。
+普通原语 `search.max_tau` 保持原生0.6s；若某轴半幅加速度从静止的末速度已经超过该轴速度上限，
+仅该轴按当前速度与时长推导可行正负加速度幅值，再保留负全幅/半幅/零/正半幅/全幅5值。
+默认Z因此不再全部拒绝非零候选，其他轴保持旧候选；初始固定加速度20个时长仍为0.04..0.8s。
+配置用 `search.max_vel_xy/max_vel_z/max_acc_xy/max_acc_z`；旧scalar CLI填充未显式指定
+的方向CLI限额，显式方向CLI优先。直接C++配置的scalar仍是额外逐轴上限。
+`search.*` 是避障动力学唯一配置源；每条PlanResult（含身份心跳、失败与PlanMotion响应）
+从最终core配置填写 `max_velocity_xy/max_velocity_z/max_acceleration_xy/max_acceleration_z`，
+执行端直接使用这些实际限额。直线模式由主工程 `control.yaml` 独立配置。
+原算法2.0m/s²是各轴绝对上限，水平合加速度可到2√2；当前水平合范数上限明确为2.0m/s²。
 
 可选 `time_index` 订阅由launch默认映射到 `/demo_node/trajectory_time_index`，沿用原作者
 绝对索引差小于10的节流及旧路径index+3位置/差分速度；内部检查与索引缓存按0.01s采样。
 不发布索引时从实际里程计状态规划。先固定零初始加速度搜索，仅NO_PATH时再自由加速度搜索。
-保留整个旧路径检查及稀疏步长；只对原版未初始化读取和确定越界保留必要保护。
-`/kino_path` 仅在规划成功后更新；输入失效时仍会发布结果，不用“没有新结果”推断规划失败。
+初始短coast即使未离开起点空间cell也作为临时节点保留，避免滚动刷新被迫只执行长coast；
+普通原语仍按原空间hash剪枝，20初始时长和固定零acc保持。保留整个旧路径检查及稀疏步长；只对原版未初始化读取和确定越界保留必要保护。
+`/kino_path` 仅在规划成功后更新；有活跃目标且输入失效时仍会发布结果，不用“没有新结果”推断规划失败。
 
 `CHECK_LINE` 校验完整闭线段，`VALIDATE_TRAJECTORY` 校验尚未执行的曲线部分，两者不运行 A*。
 适配器调用旧核心 `isSafe()`，沿空间按 `search.collision_step` 离散采样，保留严格小于
@@ -56,6 +74,6 @@ ctest --test-dir build/path_planning -R test_motion_adapter --output-on-failure
 上述测试仅使用隔离 DDS 域和合成几何，无飞控命令或实机解锁/起飞。
 
 参数来源按显式launch参数 → `planner.yaml`节点段 → 默认值；公共段为`path_planning`，
-主工程桥模式段为`/avoidance/path_planning`。文件不可读/语法错误打印警告并回退；
+正式桥也使用同一公共段。文件不可读/语法错误打印警告并回退；
 参数值非法仍由节点校验。可直接传`search.max_vel:=1.5`、`blind_radius:=0.0`等，
-修改源码YAML须更新安装配置并重启。配置与两种地图模式见[使用说明](../docs/USAGE.md)。
+修改源码YAML须更新安装配置并重启。共享配置见[使用说明](../docs/USAGE.md)。
