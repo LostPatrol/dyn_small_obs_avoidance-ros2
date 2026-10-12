@@ -5,11 +5,12 @@
 - SSH 别名映射已实测：`drone-new` = `192.168.112.169`；`drone-refresh` = `192.168.112.186`。两机仓库均为 `/home/nvidia/dyn_small_obs_avoidance-ros2`。
 - 本机与186的25个功能/文档文件和169逐一 SHA256 一致，均清空旧构建入口后重新构建安装。186的节点及核心库二进制 SHA256 也与169完全相同。169的原 HEAD、现场源码修改与已安装二进制保留原样；本机与186跟踪包含此次回退的 main。
 - 当前 YAML：frame=odom，blind_radius=0.3，horizon=20，resolution=0.2，safe_distance=0.25，voxel_size=0.2。Odin 入口默认 cloud=`/odin1/cloud_slam_down`、stamp_clock=receive，且仍以 launch 默认值0.0覆盖 YAML 盲区半径；实际下界为 `[-50,-50,-2]`，上界为 YAML 的 `[50,50,10]`。源码无 YAML 时的边界默认值为 `[-20,-20,0.2]` / `[20,20,5]`，不要与 launch 实际参数混淆。
-- 开发机 `.gitignore` 的既有未提交 `AGENTS.md` 忽略项、任务资料和历史报告保留。回退前 Git bundle、源码/改动及原 build/install 位于本机和186各自的 `agent/codex/rollback-169-20261012-153708/`；该目录由 COLCON_IGNORE 排除构建扫描。
+- 开发机 `.gitignore` 的既有未提交 `AGENTS.md` 忽略项、任务资料和历史报告保留。本任务开始替换时的 Git bundle、源码/改动及 build/install 位于本机和186各自的 `agent/codex/rollback-169-20261012-153708/`；该目录由 COLCON_IGNORE 排除构建扫描。
+- 186最初较新现场的备份在 `/home/nvidia/ros2-ardupilot-maintenance/sync-from-169-20261012-1536/`（含旧规划器 build/install 和额外标定目录）。同期“同步186机载代码”先回退了工作树，本任务的186源码备份已是这份回退内容；最后本任务完成规划器干净构建及 main 同步。另一任务经用户交接停止，186主工程已为169的 `51e118a` / 3.3，本次仅补齐其报告和部署记忆。
 
 # 未解决风险与验证边界
 
-- 当前旧版恢复了采样式碰撞检查，没有新版 `PlanMotion`、service-only 和累计观测快照接口。依赖这些接口的外部机载控制工程需要另行适配；本次没有修改其他仓库或启动飞控服务。
+- 当前旧版恢复了采样式碰撞检查，没有新版 `PlanMotion`、service-only 和累计观测快照接口。本机主工程业务代码仍3.4，其较新避障桥接口未随本次回退适配；186主工程已在交接任务中同步169的3.3。本次仅补齐其他仓库的报告/记忆，未改其业务代码或启动飞控服务。
 - 本机、186各33个独立测试用例中32通过、1失败；169原有二进制也复现 `Search.CollisionBetweenPrimitiveEndpoints`：距离0.099990361693828175 m小于0.1 m阈值。这是旧版保留的采样间隙风险，未修算法或降低测试标准。colcon 的37测试/2失败统计含 CTest 包装层重复，不能解释为两个独立失败。
 - 本机/186实际安装 Odin 启动参数和话题读参验证通过；本机10秒合成竖杆基准去除首秒后90条结果均 REACH_END。只证明独立规划计算与输出，不证明真实传感器、机载执行闭环或实飞效果。
 - `/plan_result` 是每轮当前有效性的依据；`/kino_path` 只保留最后成功预览。一次性目标在进程重启后需重发，`goal_revision=0` 表示未收到目标。参数设置不会动态重配内部成员；需重启应用。
