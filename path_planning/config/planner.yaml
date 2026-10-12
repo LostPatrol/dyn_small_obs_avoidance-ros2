@@ -5,7 +5,7 @@ path_planning:
   ros__parameters:
     # Exact frame_id required on cloud, odometry pose and goal; this node does not perform TF transforms.
     planning_frame: odom
-    # Hz, finite and positive (at most 1000). Timer frequency is not a hard real-time guarantee.
+    # Hz, finite and positive (at most 1000): input-loss diagnostics only; searches are event-driven.
     planning_rate: 10.0
     # Seconds, >0: maximum steady-clock reception age for cloud and odometry.
     # In ros mode the same limit also applies to header age; source time may lead by at most 0.05 s.
@@ -37,7 +37,7 @@ path_planning:
     # Seconds, >0: regular acceleration-primitive duration; larger steps change search reach/granularity.
     search.max_tau: 0.6
     # Seconds, >0: maximum initial fixed-acceleration primitive duration (20 candidate durations).
-    # Used by the core only for search(init=true); the ROS wrapper currently calls init=false.
+    # Standalone tries init=true first; explicit motion-service PLAN retains init=false.
     search.init_max_tau: 0.8
     # m/s and m/s², >0, per axis. Euclidean limits can be sqrt(3) times these values.
     search.max_vel: 2.0
@@ -61,7 +61,7 @@ path_planning:
     # Sampling density is independent of the radius; effective radius = safe_distance (0.45 m).
     search.collision_step: 0.05
     # Seconds, (0,60]: cooperative search budget, excluding map building and result serialization.
-    # A difficult search can exceed the nominal 100 ms timer period; 10 Hz output is not guaranteed.
+    # A difficult event-triggered search can exceed this cooperative budget; output is not periodic.
     search.search_budget: 0.3
     # At least 2 search nodes, preallocated at construction; exhausted searches return NODE_LIMIT.
     search.allocate_num: 100000

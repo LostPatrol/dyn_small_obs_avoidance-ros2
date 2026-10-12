@@ -10,7 +10,7 @@ ROS API 只留在 `path_planning`；`path_searching` 使用普通 C++17/Eigen/PC
 | catkin/roscpp/ROS1 launch | ament_cmake/rclcpp/rosidl/Python launch，Jazzy 原生构建 |
 | ROS 参数、时钟、点云调试发布耦合进核心 | `SearchConfig` 配置；steady_clock 搜索预算；核心不链接 rclcpp |
 | 起点 z 速度写入 y、未初始化目标/起点 | wrapper 分别保存 p/v、输入就绪状态；默认按 Odometry 语义将 child-frame twist 旋转到 world |
-| 路径点数加一、外部 time_index 越界 | 不保留 demo time-index 执行器协议；从实际状态重规划；标准容器长度与精确采样 |
+| 路径点数加一、外部 time_index 越界 | 独立入口恢复原time-index节流/初态，按真实容器长度防确定越界 |
 | 搜索失败留下旧轨迹 | 每轮 reset；PlanResult 携带失败状态和空轨迹；kino_path 保留最后成功预览，不刷新旧时间戳 |
 | 无定义的 origin/map_size/time、timeToIndex 无返回 | 显式上下界、完整状态初始化、时间索引返回与正确动态 hash 索引 |
 | priority_queue 内部节点原地改 f-score | 队列保存不可变 score 快照，降分时重新入堆，跳过旧条目 |
@@ -34,7 +34,9 @@ ROS wrapper 使用 `dynamic=false`。
 最近存储点距离严格小于 `safe_distance` 才拒绝，不再增加体素位移或采样间隙补偿。
 因此0.45 m约束针对KD-Tree中的体素质心，不能保证对每个原始点或每个连续时间点同样净空。
 
-定时规划、源时标检查、原子状态和带时间轨迹是通用 ROS2 边界，不包含航点业务状态机。
+独立入口在2026-10-12恢复ROS1目标/云事件重规划、整个旧路径stride40检查、到达0.3m早退、
+执行索引节流和init=true/NO_PATH后false重试；仅输入失效诊断保留定时器。
+源时标检查、原子状态和带时间轨迹是通用 ROS2 边界，不包含航点业务状态机。
 无人机控制中的 HOLD/LAND、yaw、轨迹衔接、观察覆盖判据、真实机体包络及外参不属于本次移植。
 
 ## 差异与实现范围
@@ -45,8 +47,8 @@ ROS wrapper 使用 `dynamic=false`。
 task37 审查的 A01–A28 是差异核对表，包含有意的 ROS2 行为选择、已保留的算法近似及历史缺陷，
 不能把整张表当作必须恢复旧行为的 bug 清单。当前差异包括：
 
-- A01–A07：输入接受/预处理、body twist 旋转、定时触发、实际状态重规划、自由初始加速度、
-  时标/新鲜度检查及可选盲区。没有实现 ROS1 原始点序重放、执行器索引或两阶段 init 重试。
+- A01–A07：输入接受/预处理、body twist旋转、时标/新鲜度检查及可选盲区仍保留。
+  独立入口已恢复ROS1事件触发、执行器索引初态和两阶段init重试；没有恢复原始点序抽稀。
 - A08–A14：明确统一边界、碰撞距离与ROS1对齐但采样更密、shot 时长候选和动力学校验、终止策略及前置拒绝。
   没有恢复未初始化边界、粗碰撞检查或不限导数的历史 shot。
 - A15–A22：主要运动学/代价和位置格近似保留；加权启发式未调成另一算法。

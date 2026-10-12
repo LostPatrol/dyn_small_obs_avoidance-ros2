@@ -16,6 +16,7 @@ def generate_launch_description():
         DeclareLaunchArgument('cloud', default_value='/odin1/cloud_slam_down'),
         DeclareLaunchArgument('odom', default_value='/odin1/odometry'),
         DeclareLaunchArgument('goal', default_value='/goal'),
+        DeclareLaunchArgument('time_index', default_value='/demo_node/trajectory_time_index'),
         # Explicit bench opt-in; this launch argument overrides the YAML radius.
         DeclareLaunchArgument('blind_radius', default_value='0.0'),
         Node(package='path_planning', executable='path_planning_node', name='path_planning',
@@ -29,5 +30,6 @@ def generate_launch_description():
                  'search.lower': [-50.0, -50.0, -2.0],
              }], remappings=[('cloud', LaunchConfiguration('cloud')),
                              ('odom', LaunchConfiguration('odom')),
-                             ('goal', LaunchConfiguration('goal'))]),
+                             ('goal', LaunchConfiguration('goal')),
+                             ('time_index', LaunchConfiguration('time_index'))]),
     ])

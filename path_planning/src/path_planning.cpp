@@ -1,4 +1,4 @@
-// GPL-3.0: Jazzy standalone wrapper and optional motion service; deployed search remains unchanged.
+// GPL-3.0: Jazzy wrapper with upstream event-driven replanning; motion-service search is unchanged.
 #include "output_contract.hpp"
 #include "motion_adapter.hpp"
 #include <path_searching/kinodynamic_astar.h>
@@ -9,6 +9,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <std_msgs/msg/int64.hpp>
 #include <pcl_conversions/pcl_conversions.h>
 #include <cmath>
 #include <limits>
@@ -89,14 +90,21 @@ class Planner : public rclcpp::Node {
         [this](nav_msgs::msg::Odometry::ConstSharedPtr m){ odom(*m); });
     goal_sub_=create_subscription<geometry_msgs::msg::PoseStamped>("goal",rclcpp::QoS(1),
         [this](geometry_msgs::msg::PoseStamped::ConstSharedPtr m){ goal(*m); });
+    if (!service_only_) index_sub_=create_subscription<std_msgs::msg::Int64>("time_index",rclcpp::QoS(1000),
+        [this](std_msgs::msg::Int64::ConstSharedPtr m){ replan_index_=m->data; });
     result_pub_=create_publisher<Result>("plan_result",rclcpp::QoS(1));
     path_pub_=create_publisher<nav_msgs::msg::Path>("kino_path",rclcpp::QoS(1));
     filtered_pub_=create_publisher<sensor_msgs::msg::PointCloud2>("filtered_cloud",sensor_qos);
     motion_service_=create_service<path_planning::srv::PlanMotion>("plan_motion",
       [this](const path_planning::srv::PlanMotion::Request::SharedPtr request,
              path_planning::srv::PlanMotion::Response::SharedPtr response) { motion(*request,*response); });
-    if (!service_only_) timer_=create_wall_timer(std::chrono::duration<double>(1/rate_),[this]{ plan(); });
-    RCLCPP_INFO(get_logger(),"Standalone planner ready: frame=%s, %.1f Hz, clock=%s",frame_.c_str(),rate_,stamp_clock_.c_str());
+    // Retain input-loss diagnostics, but never repeat a search from the timer.
+    if (!service_only_) timer_=create_wall_timer(std::chrono::duration<double>(1/rate_),[this]{
+      processPendingCloud();
+      if (goal_status_ || odom_status_ || cloud_status_ || !fresh(cloud_received_,cloud_stamp_) ||
+          !fresh(odom_received_,odom_stamp_)) executePlan(position_,velocity_,goal_,false);
+    });
+    RCLCPP_INFO(get_logger(),"Planner ready: frame=%s, event-driven standalone, clock=%s",frame_.c_str(),stamp_clock_.c_str());
   }
 
  private:
@@ -210,6 +218,7 @@ class Planner : public rclcpp::Node {
     filtered.header=pending.header; filtered_pub_->publish(filtered);
     cloud_received_=pending.received; cloud_stamp_=pending.header.stamp; cloud_status_=0;
     pending_cloud_.reset();
+    if (!service_only_) replan();
   }
   // Pose is already in the planning frame. By Odometry convention, twist is in child_frame_id;
   // rotate its linear component using the pose orientation unless the producer explicitly uses world twist.
@@ -249,9 +258,47 @@ class Planner : public rclcpp::Node {
     if (!correctFrame(m.header)) { goal_status_=Result::FRAME_MISMATCH; return; }
     goal_=vec(m.pose.position);
     goal_status_=goal_.allFinite()?0:Result::INVALID_INPUT;
+    if (!service_only_ && !goal_status_ && !odom_status_) plan();
   }
-  // Every attempt emits an atomic status. Path is a last-success visualization, not validity state.
-  void plan() { executePlan(position_,velocity_,goal_,false); }
+  // Upstream cloud trigger: inspect the WHOLE old path at stride 40, not just its remainder.
+  // Keep a failed replan pending; only successful publication clears the flag.
+  void replan() {
+    if (goal_status_ || (goal_-position_).norm()<0.3 || standalone_path_.empty() || odom_status_) return;
+    for (size_t i=0;i<standalone_path_.size();i+=40) {
+      if (replan_flag_) break;
+      const auto& p=standalone_path_[i];
+      replan_flag_=!core_->isSafe(p.x(),p.y(),p.z());
+    }
+    if (replan_flag_) plan();
+  }
+  // Preserve upstream execution-index throttling and the old-path initial state when supplied.
+  // Actual vector length guards the upstream N+1/index accesses that otherwise read out of bounds.
+  void plan() {
+    Vector start=position_,velocity=velocity_;
+    if (!first_plan_ && replan_index_!=-1) {
+      if (std::abs(static_cast<long double>(last_replan_index_)-replan_index_)<10) return;
+      const auto n=static_cast<int64_t>(standalone_path_.size());
+      if (replan_index_<0 || replan_index_>=n) return;
+      int64_t used=replan_index_+3;
+      last_replan_index_=replan_index_;
+      if (used>n-4) used=replan_index_;
+      start=standalone_path_[used];
+      if (used+2>=n) {
+        if (used<2) return;
+        velocity=(standalone_path_[used]-standalone_path_[used-2])/0.02;
+      } else if (used<2) {
+        velocity=(standalone_path_[used+2]-standalone_path_[used])/0.02;
+      } else {
+        velocity=(standalone_path_[used+2]-standalone_path_[used-2])/0.04;
+      }
+    }
+    const auto result=executePlan(start,velocity,goal_,false);
+    if (result.status==Result::REACH_END || result.status==Result::REACH_HORIZON) {
+      // ROS1's execution-index/check buffer is sampled at 0.01 s; public output keeps sample_step.
+      standalone_path_=core_->getKinoTraj(0.01);
+      first_plan_=false; replan_flag_=false;
+    }
+  }
   Result executePlan(const Vector& start,const Vector& velocity,const Vector& goal,bool requested) {
     processPendingCloud();
     // Readiness flags are internal: zero means valid input, not a published PlanResult status.
@@ -267,8 +314,11 @@ class Planner : public rclcpp::Node {
       if (!fresh(cloud_received_,cloud_stamp_)) invalidateCloud(Result::STALE_INPUT,"cloud expired; map reset");
     } else {
       const auto began=Clock::now();
-      // No acceleration measurement in Odometry: use the unrestricted primitive search, with actual p/v.
-      result.status=core_->search(start,velocity,Vector::Zero(),goal,Vector::Zero(),false);
+      // Standalone matches ROS1: fixed zero initial acceleration, retry NO_PATH with free acceleration.
+      // Explicit motion-service requests retain the deployed unrestricted search behavior.
+      result.status=core_->search(start,velocity,Vector::Zero(),goal,Vector::Zero(),!requested);
+      if (!requested && result.status==Result::NO_PATH)
+        result.status=core_->search(start,velocity,Vector::Zero(),goal,Vector::Zero(),false);
       result.planning_ms=std::chrono::duration<double,std::milli>(Clock::now()-began).count();
       result.detail=result.status==Result::REACH_END?"goal reached by trajectory":
           result.status==Result::REACH_HORIZON?"partial horizon; endpoint is not goal":"search failed";
@@ -398,6 +448,9 @@ class Planner : public rclcpp::Node {
   std::unique_ptr<KinodynamicAstar> core_;
   std::string frame_,stamp_clock_,map_mode_,planner_session_,cloud_detail_="no cloud received";
   bool service_only_=false;
+  bool first_plan_=true,replan_flag_=false;
+  int64_t replan_index_=-1,last_replan_index_=-1;
+  std::vector<Vector> standalone_path_;  // Last successful ROS1 0.01-s check/index buffer.
   double rate_,timeout_,step_,max_duration_,build_budget_; int max_samples_; bool body_twist_;
   // Startup-only filter: old accumulated observations are never recropped as the vehicle moves.
   struct BlindPose { int64_t stamp; Vector origin; };
@@ -419,6 +472,7 @@ class Planner : public rclcpp::Node {
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
+  rclcpp::Subscription<std_msgs::msg::Int64>::SharedPtr index_sub_;
   rclcpp::Publisher<Result>::SharedPtr result_pub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr filtered_pub_;

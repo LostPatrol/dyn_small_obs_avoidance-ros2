@@ -85,7 +85,7 @@ ROS 2 bag replay, input conventions and configuration are described in the [usag
 
 The original paper's flight performance has not been reproduced by this port.
 The current implementation does not predict obstacle motion or verify observed free space;
-10 Hz planning is not a hard real-time guarantee.
+Standalone searches follow ROS1 goal/cloud events; planning_rate only controls input-loss diagnostics.
 
 ## 6. Acknowledgments and license
 

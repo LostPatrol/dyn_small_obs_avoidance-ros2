@@ -14,8 +14,10 @@ def generate_launch_description():
         DeclareLaunchArgument('cloud', default_value='/cloud_registered'),
         DeclareLaunchArgument('odom', default_value='/Odometry'),
         DeclareLaunchArgument('goal', default_value='/goal'),
+        DeclareLaunchArgument('time_index', default_value='/demo_node/trajectory_time_index'),
         Node(package='path_planning', executable='path_planning_node', name='path_planning',
              output='screen', parameters=[LaunchConfiguration('config')],
              remappings=[('cloud', LaunchConfiguration('cloud')), ('odom', LaunchConfiguration('odom')),
-                         ('goal', LaunchConfiguration('goal'))]),
+                         ('goal', LaunchConfiguration('goal')),
+                         ('time_index', LaunchConfiguration('time_index'))]),
     ])

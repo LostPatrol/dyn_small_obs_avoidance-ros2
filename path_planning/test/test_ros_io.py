@@ -1,4 +1,4 @@
-"""Real DDS regressions for strict XYZ layouts, bounded outputs, frames and freshness."""
+"""Real DDS input/output regressions; explicit goals request each independent search."""
 import math
 import os
 import signal
@@ -110,7 +110,11 @@ def test_planner_process(tmp_path, blind_radius):
             odom.twist.twist.linear.x, odom.twist.twist.linear.y, odom.twist.twist.linear.z = velocity
             odoms.publish(odom)
 
+        last_target = (4.0, 0.0)
+
         def target(x=4.0, y=0.0):
+            nonlocal last_target
+            last_target = (x, y)
             goal = PoseStamped()
             goal.header.frame_id = 'map'
             goal.pose.position.x, goal.pose.position.z = x, 1.0
@@ -118,14 +122,25 @@ def test_planner_process(tmp_path, blind_radius):
             goal.pose.orientation.w = 1.0
             goals.publish(goal)
 
-        def wait_for(predicate, publish=None, seconds=5):
+        def wait_for(predicate, publish=None, seconds=5, retry_target=False):
+            """Retry the current goal only when this IO case needs a fresh search result.
+
+            Safe cloud updates and the timer no longer request planning. Remember the
+            explicitly selected coordinates so recovery cannot replace the translated goal.
+            """
             results.clear()
             deadline = time.monotonic()+seconds
             while time.monotonic()<deadline:
                 assert proc.poll() is None, (tmp_path / 'node.log').read_text()
                 if publish:
                     publish()
+                if retry_target:
+                    target(*last_target)
                 rclpy.spin_once(node, timeout_sec=0.03)
+                # A requested search emits both result and preview callbacks. Drain ready
+                # callbacks before checking source freshness, avoiding a growing DDS backlog.
+                for _ in range(6):
+                    rclpy.spin_once(node, timeout_sec=0.0)
                 if results and predicate(results[-1]):
                     return results[-1]
                 time.sleep(0.02)
@@ -155,11 +170,11 @@ def test_planner_process(tmp_path, blind_radius):
                 # At x=-0.4, distance to sensor centre x=0.2 is 0.6 (>blind radius),
                 # but distance to start is 0.4 (<ROS1 clearance): retain it and reject the start.
                 wait_for(lambda r: r.status == r.NO_PATH,
-                         lambda: feed(points=((-20.,-20.,1.),(-.4,0.,1.))))
+                         lambda: feed(points=((-20.,-20.,1.),(-.4,0.,1.))), retry_target=True)
                 no_map = wait_for(lambda r: r.status == r.NO_MAP,
                                   lambda: feed(points=((.1,0.,1.),)))
                 assert no_map.map_points == 0 and not no_map.segments
-                wait_for(lambda r: r.status == r.REACH_END, feed)
+                wait_for(lambda r: r.status == r.REACH_END, feed, retry_target=True)
                 # Fresh callbacks with mismatched acquisition times must not crop using wrong poses.
                 def skewed():
                     future = (node.get_clock().now()+rclpy.duration.Duration(seconds=.3)).to_msg()
@@ -169,38 +184,38 @@ def test_planner_process(tmp_path, blind_radius):
                 assert mismatch.map_points == 0
                 # Allow source time to catch up to the deliberately future-stamped frame.
                 time.sleep(.35)
-                wait_for(lambda r: r.status == r.REACH_END, feed)
-                feed(delayed_pair=True)
+                wait_for(lambda r: r.status == r.REACH_END, feed, retry_target=True)
                 delayed = wait_for(lambda r: r.status == r.REACH_END and
                                    r.cloud_stamp.sec*10**9+r.cloud_stamp.nanosec >
-                                   node.get_clock().now().nanoseconds)
+                                   node.get_clock().now().nanoseconds,
+                                   lambda: feed(delayed_pair=True), retry_target=True)
                 assert delayed.segments
                 time.sleep(.25)
-                wait_for(lambda r: r.status == r.REACH_END, feed)
+                wait_for(lambda r: r.status == r.REACH_END, feed, retry_target=True)
             # Odometry twist is in the child frame: +x body at yaw=90deg becomes +y world.
             moving = wait_for(lambda r: r.status == r.REACH_END and abs(r.segments[0].y[1]-0.3)<1e-6,
-                              lambda: feed(velocity=(0.3, 0.0, 0.1), yaw=math.pi/2))
+                              lambda: feed(velocity=(0.3, 0.0, 0.1), yaw=math.pi/2), retry_target=True)
             assert abs(moving.segments[0].x[1])<1e-6
             assert abs(moving.segments[0].z[1]-0.1)<1e-6
             blocked = wait_for(lambda r: r.status == r.NO_PATH,
-                               lambda: feed(points=((-20.0,-20.0,1.0),(4.0,0.0,1.0))))
+                               lambda: feed(points=((-20.0,-20.0,1.0),(4.0,0.0,1.0))), retry_target=True)
             assert not blocked.segments and not blocked.trajectory.points
             wrong = wait_for(lambda r: r.status == r.FRAME_MISMATCH, lambda: feed(frame='wrong'))
             assert not wrong.segments
-            wait_for(lambda r: r.status == r.REACH_END, feed)
+            wait_for(lambda r: r.status == r.REACH_END, feed, retry_target=True)
             stale = wait_for(lambda r: r.status == r.STALE_INPUT, seconds=2)
             assert not stale.segments and not stale.trajectory.points
-            wait_for(lambda r: r.status == r.REACH_END, feed)
+            wait_for(lambda r: r.status == r.REACH_END, feed, retry_target=True)
             empty = wait_for(lambda r: r.status == r.INVALID_INPUT, lambda: feed(points=()))
             assert not empty.segments
-            wait_for(lambda r: r.status == r.REACH_END, feed)
+            wait_for(lambda r: r.status == r.REACH_END, feed, retry_target=True)
             malformed = wait_for(lambda r: r.status == r.INVALID_INPUT, lambda: feed(malformed=True))
             assert not malformed.segments
-            wait_for(lambda r: r.status == r.REACH_END, feed)
+            wait_for(lambda r: r.status == r.REACH_END, feed, retry_target=True)
             if not blind_radius:
                 # Real DDS sends both duplicate orders through the installed PCL-linked wrapper;
                 # every invalid schema resets the map and emits no current executable trajectory.
-                recovered = wait_for(lambda r: r.status == r.REACH_END, feed)
+                recovered = wait_for(lambda r: r.status == r.REACH_END, feed, retry_target=True)
                 for variant in ('duplicate_bad_first', 'duplicate_bad_last', 'duplicate_valid',
                                 'offset_outside', 'offset_crosses_point', 'overlap', 'wrong_type',
                                 'count_zero', 'count_two', 'empty_data', 'short_row'):
@@ -211,7 +226,7 @@ def test_planner_process(tmp_path, blind_radius):
                     assert invalid.map_points == 0, variant
                     assert all(p.header.stamp != invalid.header.stamp for p in paths), variant
                     recovered = wait_for(lambda r: r.status == r.REACH_END and
-                                         r.sequence > invalid.sequence, feed)
+                                         r.sequence > invalid.sequence, feed, retry_target=True)
                 for nonfinite in (float('nan'), float('inf'), -float('inf')):
                     invalid = wait_for(lambda r: r.status == r.INVALID_INPUT and
                                        r.sequence > recovered.sequence,
@@ -219,12 +234,12 @@ def test_planner_process(tmp_path, blind_radius):
                     assert not invalid.segments and not invalid.trajectory.points
                     assert invalid.map_points == 0
                     recovered = wait_for(lambda r: r.status == r.REACH_END and
-                                         r.sequence > invalid.sequence, feed)
+                                         r.sequence > invalid.sequence, feed, retry_target=True)
                 earliest_extended_stamp = node.get_clock().now().nanoseconds
                 extended = wait_for(lambda r: r.status == r.REACH_END and
                                     r.sequence > recovered.sequence and
                                     r.cloud_stamp.sec*10**9+r.cloud_stamp.nanosec >= earliest_extended_stamp,
-                                    lambda: feed(variant='extended_padding'))
+                                    lambda: feed(variant='extended_padding'), retry_target=True)
                 assert extended.segments and extended.trajectory.points
                 assert abs(extended.trajectory.points[-1].transforms[0].translation.x-4.) < 1e-8
             # A repeated observation cannot extend map freshness while odometry stays fresh.
@@ -232,13 +247,13 @@ def test_planner_process(tmp_path, blind_radius):
             duplicate = wait_for(lambda r: r.status == r.STALE_INPUT,
                                  lambda: feed(cloud_stamp=frozen), seconds=2)
             assert not duplicate.segments
-            wait_for(lambda r: r.status == r.REACH_END, feed)
+            wait_for(lambda r: r.status == r.REACH_END, feed, retry_target=True)
             negative = node.get_clock().now().to_msg()
             negative.sec = -1
             bad_time = wait_for(lambda r: r.status == r.INVALID_INPUT,
                                 lambda: feed(cloud_stamp=negative))
             assert not bad_time.segments
-            wait_for(lambda r: r.status == r.REACH_END, feed)
+            wait_for(lambda r: r.status == r.REACH_END, feed, retry_target=True)
             # A new, blocked goal must carry a new revision and cannot retain the old path.
             changed = wait_for(lambda r: r.status == r.NO_PATH and r.goal_revision > ok.goal_revision,
                                lambda: (feed(points=((-20.0,-20.0,1.0),(2.0,0.0,1.0))), target(2.0)))
