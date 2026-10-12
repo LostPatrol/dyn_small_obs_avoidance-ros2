@@ -69,9 +69,9 @@ path_planning:
     search.search_budget: 0.3
     # At least 2 search nodes, preallocated at construction; exhausted searches return NODE_LIMIT.
     search.allocate_num: 100000
-    # Accepted clouds per bank, >=1. Two banks alternate; history lasts roughly 50-100 updates here.
-    # At 10 Hz this is about 5-10 seconds, not a time-based expiry or moving-object prediction.
-    search.tree_period: 50
+    # Accepted clouds per bank, >=1. Two banks alternate; history lasts roughly 20-40 updates here.
+    # At 10 Hz this is about 2-4 seconds, not a time-based expiry or moving-object prediction.
+    search.tree_period: 20
     # >=1: cap on input-cloud size and combined filtered map size; exceeding it invalidates the map.
     search.max_cloud_points: 500000
     # Meters: inclusive world-frame [x,y,z] bounds, each lower coordinate strictly below upper.

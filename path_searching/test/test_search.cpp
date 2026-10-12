@@ -207,17 +207,17 @@ TEST(Search, NumericRangeAndAccelerationInputFailuresAreExplicit) {
   EXPECT_TRUE(large.getSegments().empty());
   EXPECT_LT(std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count(),0.5);
 }
-// The normal period is 50 accepted clouds. Mark each bank independently at its first update.
+// The normal period is 20 accepted clouds. Mark each bank independently at its first update.
 TEST(Search, DefaultTreePeriodSwitchesAtExactAcceptedUpdateBoundaries) {
   KinodynamicAstar k(config());
-  for (int update=1;update<=101;++update) {
+  for (int update=1;update<=41;++update) {
     auto cloud=background();
     if (update==1) cloud.push_back({2,0,1});
-    if (update==51) cloud.push_back({4,0,1});
+    if (update==21) cloud.push_back({4,0,1});
     ASSERT_TRUE(k.setKdtree(cloud));
-    if (update==49 || update==50 || update==51 || update==99 || update==100 || update==101) {
-      EXPECT_EQ(k.isSafe(2,0,1),update==101) << "update " << update;
-      EXPECT_EQ(k.isSafe(4,0,1),update<51) << "update " << update;
+    if (update==19 || update==20 || update==21 || update==39 || update==40 || update==41) {
+      EXPECT_EQ(k.isSafe(2,0,1),update==41) << "update " << update;
+      EXPECT_EQ(k.isSafe(4,0,1),update<21) << "update " << update;
       EXPECT_LE(k.mapPointCount(),4u);
     }
   }

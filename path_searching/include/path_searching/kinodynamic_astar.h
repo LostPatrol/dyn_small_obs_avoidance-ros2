@@ -28,7 +28,7 @@ struct SearchConfig {
   double safe_distance = 0.45, voxel_size = 0.1, collision_step = 0.05;
   double search_budget = 0.08;  // steady-clock seconds per search, excludes map construction
   // Node-pool capacity; valid cloud updates per bank before alternating to the other tree.
-  int allocate_num = 100000, tree_period = 50;
+  int allocate_num = 100000, tree_period = 20;
   // Limit for a single input cloud and the sum of both filtered banks; overflow invalidates the map.
   std::size_t max_cloud_points = 500000;
   // Inclusive world-frame position bounds (m), shared by primitives and terminal curves.
