@@ -1,7 +1,9 @@
-// GPL-3.0: Jazzy orchestration with strict XYZ layouts and bounded, freshness-gated outputs.
+// GPL-3.0: Jazzy standalone wrapper and optional motion service; deployed search remains unchanged.
 #include "output_contract.hpp"
+#include "motion_adapter.hpp"
 #include <path_searching/kinodynamic_astar.h>
 #include <path_planning/msg/plan_result.hpp>
+#include <path_planning/srv/plan_motion.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -46,8 +48,8 @@ class Planner : public rclcpp::Node {
     const int max_points = declare_parameter("search.max_cloud_points", static_cast<int>(c.max_cloud_points));
     if (max_points < 1) throw std::invalid_argument("max_cloud_points must be positive");
     c.max_cloud_points = max_points;
-    auto lower = declare_parameter("search.lower", std::vector<double>{-20,-20,0.2});
-    auto upper = declare_parameter("search.upper", std::vector<double>{20,20,5});
+    auto lower = declare_parameter("search.lower", std::vector<double>{-50,-50,0.2});
+    auto upper = declare_parameter("search.upper", std::vector<double>{50,50,5});
     if (lower.size()!=3 || upper.size()!=3) throw std::invalid_argument("bounds require three coordinates");
     c.lower=Eigen::Map<Vector>(lower.data()); c.upper=Eigen::Map<Vector>(upper.data());
     core_ = std::make_unique<KinodynamicAstar>(c);
@@ -59,6 +61,13 @@ class Planner : public rclcpp::Node {
     build_budget_=declare_parameter("output.build_budget",0.1);
     body_twist_=declare_parameter("odometry_twist_in_body",true);
     blind_radius_=declare_parameter("cloud.blind_radius",0.0);
+    service_only_=declare_parameter("service_only",false);
+    map_mode_=declare_parameter("cloud.map_mode",std::string("dual_tree"));
+    if (map_mode_!="dual_tree" && map_mode_!="latest_observation")
+      throw std::invalid_argument("invalid cloud.map_mode");
+    if (map_mode_=="latest_observation" && !service_only_)
+      throw std::invalid_argument("latest_observation requires service_only");
+    planner_session_=std::to_string(Clock::now().time_since_epoch().count());
     blind_pose_tolerance_=declare_parameter("cloud.blind_pose_tolerance",0.05);
     blind_wait_=declare_parameter("cloud.blind_wait",0.15);
     const auto offset=declare_parameter("cloud.blind_origin_offset",std::vector<double>{0,0,0});
@@ -83,7 +92,10 @@ class Planner : public rclcpp::Node {
     result_pub_=create_publisher<Result>("plan_result",rclcpp::QoS(1));
     path_pub_=create_publisher<nav_msgs::msg::Path>("kino_path",rclcpp::QoS(1));
     filtered_pub_=create_publisher<sensor_msgs::msg::PointCloud2>("filtered_cloud",sensor_qos);
-    timer_=create_wall_timer(std::chrono::duration<double>(1/rate_),[this]{ plan(); });
+    motion_service_=create_service<path_planning::srv::PlanMotion>("plan_motion",
+      [this](const path_planning::srv::PlanMotion::Request::SharedPtr request,
+             path_planning::srv::PlanMotion::Response::SharedPtr response) { motion(*request,*response); });
+    if (!service_only_) timer_=create_wall_timer(std::chrono::duration<double>(1/rate_),[this]{ plan(); });
     RCLCPP_INFO(get_logger(),"Standalone planner ready: frame=%s, %.1f Hz, clock=%s",frame_.c_str(),rate_,stamp_clock_.c_str());
   }
 
@@ -190,6 +202,9 @@ class Planner : public rclcpp::Node {
         invalidateCloud(Result::NO_MAP,"all cloud points removed by blind filter"); return;
       }
     }
+    // The bridge owns persistent observation evidence. Replace its complete snapshots only in
+    // explicit service mode; standalone retains the deployed two-bank accumulation unchanged.
+    if (service_only_ && map_mode_=="latest_observation") core_->clearMap();
     if (!core_->setKdtree(points)) { invalidateCloud(Result::INVALID_INPUT,"nonfinite cloud or map capacity exceeded"); return; }
     sensor_msgs::msg::PointCloud2 filtered; pcl::toROSMsg(points,filtered);
     filtered.header=pending.header; filtered_pub_->publish(filtered);
@@ -236,28 +251,29 @@ class Planner : public rclcpp::Node {
     goal_status_=goal_.allFinite()?0:Result::INVALID_INPUT;
   }
   // Every attempt emits an atomic status. Path is a last-success visualization, not validity state.
-  void plan() {
+  void plan() { executePlan(position_,velocity_,goal_,false); }
+  Result executePlan(const Vector& start,const Vector& velocity,const Vector& goal,bool requested) {
     processPendingCloud();
     // Readiness flags are internal: zero means valid input, not a published PlanResult status.
     // The first failing gate determines the reported reason; this is not an aggregate diagnostic.
     Result result; result.header.stamp=now(); result.header.frame_id=frame_;
     result.sequence=++sequence_; result.goal_revision=goal_revision_;
     result.cloud_stamp=cloud_stamp_; result.odometry_stamp=odom_stamp_;
-    if (goal_status_) { result.status=goal_status_; result.detail="goal unavailable or invalid"; }
-    else if (odom_status_) { result.status=odom_status_; result.detail="odometry unavailable or invalid"; }
+    if (!requested && goal_status_) { result.status=goal_status_; result.detail="goal unavailable or invalid"; }
+    else if (!requested && odom_status_) { result.status=odom_status_; result.detail="odometry unavailable or invalid"; }
     else if (cloud_status_) { result.status=cloud_status_; result.detail=cloud_detail_; }
-    else if (!fresh(cloud_received_,cloud_stamp_) || !fresh(odom_received_,odom_stamp_)) {
+    else if (!fresh(cloud_received_,cloud_stamp_) || (!requested && !fresh(odom_received_,odom_stamp_))) {
       result.status=Result::STALE_INPUT; result.detail="cloud or odometry expired";
       if (!fresh(cloud_received_,cloud_stamp_)) invalidateCloud(Result::STALE_INPUT,"cloud expired; map reset");
     } else {
       const auto began=Clock::now();
       // No acceleration measurement in Odometry: use the unrestricted primitive search, with actual p/v.
-      result.status=core_->search(position_,velocity_,Vector::Zero(),goal_,Vector::Zero(),false);
+      result.status=core_->search(start,velocity,Vector::Zero(),goal,Vector::Zero(),false);
       result.planning_ms=std::chrono::duration<double,std::milli>(Clock::now()-began).count();
       result.detail=result.status==Result::REACH_END?"goal reached by trajectory":
           result.status==Result::REACH_HORIZON?"partial horizon; endpoint is not goal":"search failed";
       // Processing must not extend the input freshness contract.
-      if (!fresh(cloud_received_,cloud_stamp_) || !fresh(odom_received_,odom_stamp_)) {
+      if (!fresh(cloud_received_,cloud_stamp_) || (!requested && !fresh(odom_received_,odom_stamp_))) {
         result.status=Result::STALE_INPUT; result.detail="input expired during search";
       }
     }
@@ -313,13 +329,75 @@ class Planner : public rclcpp::Node {
     // This is the sole success publication gate, after all curve/message construction.
     // It covers time before publish(), not DDS queuing or a consumer's execution delay.
     path_planning::finalizeOutput(result,path,[&] {
-      return fresh(cloud_received_,cloud_stamp_) && fresh(odom_received_,odom_stamp_);
+      return fresh(cloud_received_,cloud_stamp_) && (requested || fresh(odom_received_,odom_stamp_));
     },within_budget);
-    result_pub_->publish(result);
-    if (!path.poses.empty()) path_pub_->publish(path);
+    if (!requested) {
+      result_pub_->publish(result);
+      if (!path.poses.empty()) path_pub_->publish(path);
+    }
+    return result;
+  }
+  // Service state is provided by the control authority. Queries never replace the standalone
+  // goal/odometry and never publish control outputs; the single executor serializes map access.
+  void motion(const path_planning::srv::PlanMotion::Request& request,
+              path_planning::srv::PlanMotion::Response& response) {
+    using Service=path_planning::srv::PlanMotion;
+    processPendingCloud(); response.planner_session=planner_session_;
+    auto& result=response.result;
+    result.header.stamp=now(); result.header.frame_id=frame_; result.sequence=++sequence_;
+    result.cloud_stamp=cloud_stamp_; result.map_points=core_->mapPointCount();
+    const auto received=Clock::now();
+    // Service headers are ROS timestamps even when cloud headers use device/receive mode.
+    const double request_age=validStamp(request.header.stamp) ?
+      (now()-rclcpp::Time(request.header.stamp)).seconds() : std::numeric_limits<double>::infinity();
+    const auto request_fresh=[&] {
+      return request_age>=-kFutureStampToleranceSeconds &&
+        request_age+std::chrono::duration<double>(Clock::now()-received).count()<=timeout_;
+    };
+    if (!correctFrame(request.header)) { result.status=Result::FRAME_MISMATCH; result.detail="request frame mismatch"; }
+    else if (!validStamp(request.header.stamp) || !vec(request.start).allFinite() ||
+             !vec(request.velocity).allFinite() || !vec(request.goal).allFinite() ||
+             request.mode<Service::Request::PLAN || request.mode>Service::Request::VALIDATE_TRAJECTORY) {
+      result.status=Result::INVALID_INPUT; result.detail="invalid request state, mode or timestamp";
+    } else if (!request_fresh()) { result.status=Result::STALE_INPUT; result.detail="request expired"; }
+    else if (cloud_status_) { result.status=cloud_status_; result.detail=cloud_detail_; }
+    else if (!fresh(cloud_received_,cloud_stamp_)) {
+      invalidateCloud(Result::STALE_INPUT,"cloud expired; map reset");
+      result.status=Result::STALE_INPUT; result.detail=cloud_detail_;
+    } else {
+      const auto began=Clock::now();
+      if (request.mode==Service::Request::PLAN) {
+        result=executePlan(vec(request.start),vec(request.velocity),vec(request.goal),true);
+      } else if (request.mode==Service::Request::CHECK_LINE) {
+        result.status=path_planning::MotionAdapter(*core_).line(vec(request.start),vec(request.goal));
+      } else if (request.segments.size()>path_planning::MotionAdapter::kMaxSegments) {
+        result.status=Result::INVALID_INPUT;
+      } else {
+        std::vector<TrajectorySegment> segments;
+        segments.reserve(request.segments.size());
+        for (const auto& wire:request.segments) {
+          TrajectorySegment segment; segment.duration=wire.duration;
+          for (int i=0;i<4;++i) {
+            segment.coefficients(0,i)=wire.x[i]; segment.coefficients(1,i)=wire.y[i]; segment.coefficients(2,i)=wire.z[i];
+          }
+          segments.push_back(segment);
+        }
+        result.status=path_planning::MotionAdapter(*core_).trajectory(
+          segments,request.trajectory_elapsed,vec(request.goal),max_duration_);
+      }
+      result.planning_ms=std::chrono::duration<double,std::milli>(Clock::now()-began).count();
+      if (request.mode!=Service::Request::PLAN)
+        result.detail=result.status==Result::REACH_END ? "sampled current-map geometry clear" : "geometry blocked or unavailable";
+      if (!fresh(cloud_received_,cloud_stamp_) || !request_fresh()) {
+        result.status=Result::STALE_INPUT; result.detail="input expired during service";
+        result.segments.clear(); result.trajectory.points.clear();
+      }
+    }
+    result.map_points=core_->mapPointCount();
   }
   std::unique_ptr<KinodynamicAstar> core_;
-  std::string frame_,stamp_clock_,cloud_detail_="no cloud received";
+  std::string frame_,stamp_clock_,map_mode_,planner_session_,cloud_detail_="no cloud received";
+  bool service_only_=false;
   double rate_,timeout_,step_,max_duration_,build_budget_; int max_samples_; bool body_twist_;
   // Startup-only filter: old accumulated observations are never recropped as the vehicle moves.
   struct BlindPose { int64_t stamp; Vector origin; };
@@ -345,6 +423,7 @@ class Planner : public rclcpp::Node {
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr filtered_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::Service<path_planning::srv::PlanMotion>::SharedPtr motion_service_;
 };
 int main(int argc,char** argv) {
   rclcpp::init(argc,argv);

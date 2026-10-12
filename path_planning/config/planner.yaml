@@ -45,18 +45,18 @@ path_planning:
     # Positive time penalty in integral(||acceleration||² + w_time) dt; larger favors shorter durations.
     search.w_time: 10.0
     # Meters, >0: displacement from start that permits a partial REACH_HORIZON result, not path length.
-    search.horizon: 20.0
+    search.horizon: 100.0
     # Positive heuristic weight; larger favors heuristic-directed expansion, not guaranteed optimality.
     search.lambda_heu: 5.0
     # Meters, >0: position hash cell size; distinct velocities can be merged within a spatial cell.
-    search.resolution: 0.2
+    search.resolution: 0.1
     # Seconds, >0: hash time-bin width for core dynamic=true; unused by the current ROS wrapper.
     search.time_resolution: 0.8
     # Meters, >0: ROS1 SAFE_DIST; reject nearest stored centroid distances strictly below this value.
     # No extra voxel/sampling inflation; this does not guarantee clearance from every raw point.
     search.safe_distance: 0.25
     # Meters, >0: voxel edge for accumulated clouds; matches ROS1's 0.1 m leaf size.
-    search.voxel_size: 0.2
+    search.voxel_size: 0.1
     # Meters, >0 and <=safe_distance: maximum travel interval between collision checks.
     # Sampling density is independent of the radius; effective radius = safe_distance (0.45 m).
     search.collision_step: 0.05

@@ -1,21 +1,23 @@
-<!-- 当前真实算法基线、两机同步状态和未解决风险；历史结果不等于当前实飞验收。 -->
+<!-- 当前真实算法、服务适配和逐机部署；验证边界与关键历史。 -->
 # 当前基线与部署状态
 
-- 2026-10-12 用户要求以飞机169的实际使用版本回退本库。当前 main 的功能文件为 `41199379df3a2d5d8722c5d72fbacd968172b860` 加169现场三文件改动：`planner.yaml`、`odin.launch.py`、`path_planning.cpp`。采用新的回退提交保留后续历史，不强制推送，不创建分支。
-- SSH 别名映射已实测：`drone-new` = `192.168.112.169`；`drone-refresh` = `192.168.112.186`。两机仓库均为 `/home/nvidia/dyn_small_obs_avoidance-ros2`。
-- 本机与186的25个功能/文档文件和169逐一 SHA256 一致，均清空旧构建入口后重新构建安装。186的节点及核心库二进制 SHA256 也与169完全相同。169的原 HEAD、现场源码修改与已安装二进制保留原样；本机与186跟踪包含此次回退的 main。
-- 当前 YAML：frame=odom，blind_radius=0.3，horizon=20，resolution=0.2，safe_distance=0.25，voxel_size=0.2。Odin 入口默认 cloud=`/odin1/cloud_slam_down`、stamp_clock=receive，且仍以 launch 默认值0.0覆盖 YAML 盲区半径；实际下界为 `[-50,-50,-2]`，上界为 YAML 的 `[50,50,10]`。源码无 YAML 时的边界默认值为 `[-20,-20,0.2]` / `[20,20,5]`，不要与 launch 实际参数混淆。
-- 开发机 `.gitignore` 的既有未提交 `AGENTS.md` 忽略项、任务资料和历史报告保留。本任务开始替换时的 Git bundle、源码/改动及 build/install 位于本机和186各自的 `agent/codex/rollback-169-20261012-153708/`；该目录由 COLCON_IGNORE 排除构建扫描。
-- 186最初较新现场的备份在 `/home/nvidia/ros2-ardupilot-maintenance/sync-from-169-20261012-1536/`（含旧规划器 build/install 和额外标定目录）。同期“同步186机载代码”先回退了工作树，本任务的186源码备份已是这份回退内容；最后本任务完成规划器干净构建及 main 同步。另一任务经用户交接停止，186主工程已为169的 `51e118a` / 3.3，本次仅补齐其报告和部署记忆。
+- 2026-10-12按用户最新要求，在169当前旧算法上恢复Task38接口。`path_searching`整个目录与任务开始时169快照完全一致，没有恢复连续距离算法、轴向/合量搜索限值改写或新版搜索逻辑。当前原语最多42次采样（ceil(0.6×sqrt(3)×2/0.05)）。
+- 169当前源YAML：horizon=100、resolution=0.1、voxel_size=0.1、safe_distance=0.25、max_vel/max_acc=2、max_tau=0.6、collision_step=0.05、预算0.3s、input_timeout=0.5s。以本次实时源码及ROS读参为准，旧记忆中的20/0.2配置已失效。
+- 独立Odin入口仍默认订阅 `/odin1/cloud_slam_down`，receive时钟、下界[-50,-50,-2]、上界由YAML指定[50,50,10]；launch默认blind_radius=0覆盖YAML的0.3。源码缺省bounds为[-50,-50,0.2]/[50,50,5]，沿用169现场源码，不与实际启动参数混淆。
+- 新增 `PlanMotion` 兼容服务、service_only及完整桥快照替换，仅属于wrapper/独立MotionAdapter。PLAN原样调用旧search/getSegments；CHECK_LINE及剩余曲线检查离散调用旧isSafe，不提供连续净空证明。独立入口的50帧双树累计行为保持。
+- 主工程执行层保留PD+DOB、水平1/垂直0.2m/s与加速度0.35/0.15m/s²；超包线完整曲线按统一时间缩放放慢，空间路径不变，实际p/v接入及60s时长门槛不放宽。
+- drone-new=.169、drone-refresh=.186，两机路径均 `/home/nvidia/dyn_small_obs_avoidance-ros2`。两机已同步源码并原生构建；主工程共享接口恢复3.4，隔离ARM64控制/桥/服务适配测试及无FCU smoke通过。169原Odin、降采样、独立目标规划进程未重启。
+- 两机现有 `/home/nvidia/down_samp_exe.py` 为独立点云发布者，不由桥自动启动；169实测0.1m降采样、0.4m球形剔除、auto球心。可能删除真实近身障碍，保持现场配置，不把0m二次盲区当作完整链路无剔除。
+- 同步前逐机备份 `/home/nvidia/ros2-ardupilot-maintenance/task38-restore-20261012/`；开发机169源快照和运行参数位于主工程 `agent/codex/task38-restore-20261012/169/`。逐机相机/Tag及/etc配置保留，没有实机解锁或起飞。
 
 # 未解决风险与验证边界
 
-- 当前旧版恢复了采样式碰撞检查，没有新版 `PlanMotion`、service-only 和累计观测快照接口。本机主工程业务代码仍3.4，其较新避障桥接口未随本次回退适配；186主工程已在交接任务中同步169的3.3。本次仅补齐其他仓库的报告/记忆，未改其业务代码或启动飞控服务。
-- 本机、186各33个独立测试用例中32通过、1失败；169原有二进制也复现 `Search.CollisionBetweenPrimitiveEndpoints`：距离0.099990361693828175 m小于0.1 m阈值。这是旧版保留的采样间隙风险，未修算法或降低测试标准。colcon 的37测试/2失败统计含 CTest 包装层重复，不能解释为两个独立失败。
-- 本机/186实际安装 Odin 启动参数和话题读参验证通过；本机10秒合成竖杆基准去除首秒后90条结果均 REACH_END。只证明独立规划计算与输出，不证明真实传感器、机载执行闭环或实飞效果。
-- `/plan_result` 是每轮当前有效性的依据；`/kino_path` 只保留最后成功预览。一次性目标在进程重启后需重发，`goal_revision=0` 表示未收到目标。参数设置不会动态重配内部成员；需重启应用。
+- 核心19例18通过，旧 `Search.CollisionBetweenPrimitiveEndpoints` 仍失败：0.099990361693828175m < 0.1m。保留旧离散碰撞采样，不修算法、不降低测试阈值，不能宣称全量通过。
+- 新MotionAdapter四例、输出契约六例、服务真实DDS一例、原Python回归八例通过；两机ARM64几何/输出契约验证通过。主工程真实SITL六场景通过，不替代真实传感器、安装外参、长时热负载或实飞验收。
+- `/plan_result` 是独立入口每轮有效性依据；`/kino_path` 保留最后成功预览，不能直接执行旧预览。参数只在启动时复制，修改须重启。
+- 正式桥仍拒绝unknown与有效Tag修正，实际稀疏/近身覆盖可能使真实航线无法执行。上游球形剔除和旧碰撞采样均有边界，软件测试不能证明真实飞行净空。
 
-# 关键历史证据
+# 关键历史
 
-- 2026-10-10 Odin YAML 优先修复曾部署186；本次为匹配169已回退该修复。历史报告 `report-2026-10-10-odin-launch-yaml-blind-radius.md` 描述当时结果，不是当前入口行为。
-- 2026-10-10 `(2,0,1)` 目标约10 Hz NO_PATH曾定位到起点附近0.213 m点与当时0.35 m阈值冲突；同帧离线移除0.3 m球内4点后10/10成功，但未证明实飞效果或近点物理来源。该结果不适用于当前0.25 m配置的直接验收。169的 `agent/codex/drone-new-20261010/` 与历史诊断报告保留。
+- 2026-10-12早先回退到169的4119937加现场修改：开发机/186的备份在 `agent/codex/rollback-169-20261012-153708/`，186更早完整备份在 `/home/nvidia/ros2-ardupilot-maintenance/sync-from-169-20261012-1536/`。本次接口恢复取代“主工程3.3且无PlanMotion”的部署结论，旧核心选用仍有效。
+- 2026-10-10 Odin YAML优先修复已回退，历史报告不是当前入口行为。旧0.35m净空下起点近点诊断不能当作本次0.25m配置实飞验收。

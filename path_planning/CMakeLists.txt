@@ -1,4 +1,4 @@
-# Jazzy wrapper/interfaces, real DDS regressions and deterministic publication-clock checks.
+# Jazzy wrapper/motion-service interfaces, real DDS and deterministic output/geometry regressions.
 cmake_minimum_required(VERSION 3.16)
 project(path_planning LANGUAGES C CXX)
 if(POLICY CMP0144)
@@ -16,8 +16,8 @@ find_package(std_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/PolynomialSegment.msg" "msg/PlanResult.msg"
-  DEPENDENCIES std_msgs builtin_interfaces trajectory_msgs)
+  "msg/PolynomialSegment.msg" "msg/PlanResult.msg" "srv/PlanMotion.srv"
+  DEPENDENCIES std_msgs builtin_interfaces trajectory_msgs geometry_msgs)
 add_executable(path_planning_node src/path_planning.cpp)
 target_compile_features(path_planning_node PRIVATE cxx_std_17)
 target_compile_options(path_planning_node PRIVATE -Wall -Wextra -Wpedantic)
@@ -39,12 +39,17 @@ if(BUILD_TESTING)
   target_include_directories(test_output_contract PRIVATE src)
   ament_target_dependencies(test_output_contract nav_msgs)
   target_link_libraries(test_output_contract "${typesupport}")
+  ament_add_gtest(test_motion_adapter test/test_motion_adapter.cpp)
+  target_compile_features(test_motion_adapter PRIVATE cxx_std_17)
+  target_include_directories(test_motion_adapter PRIVATE src)
+  target_link_libraries(test_motion_adapter path_searching::kinodynamic_astar)
+  ament_add_pytest_test(motion_service test/test_motion_service.py TIMEOUT 90)
 endif()
 # Instrument the actual ROS wrapper as well as its test, using the same option as the core.
 # Eigen's allocator ABI must match Ubuntu's prebuilt PCL across the core-library boundary.
 option(ENABLE_SANITIZERS "Instrument wrapper and tests with ASan/UBSan" OFF)
 if(ENABLE_SANITIZERS)
-  foreach(target path_planning_node test_output_contract)
+  foreach(target path_planning_node test_output_contract test_motion_adapter)
     if(TARGET ${target})
       target_compile_definitions(${target} PRIVATE EIGEN_MALLOC_ALREADY_ALIGNED=1)
       target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
