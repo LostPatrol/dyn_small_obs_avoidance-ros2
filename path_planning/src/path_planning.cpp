@@ -56,7 +56,7 @@ class Planner : public rclcpp::Node {
     core_ = std::make_unique<KinodynamicAstar>(c);
     frame_=declare_parameter("planning_frame", "camera_init");
     rate_=declare_parameter("planning_rate",10.0); timeout_=declare_parameter("input_timeout",0.5);
-    replan_interval_=declare_parameter("replan_interval",1.0);
+    replan_interval_=declare_parameter("replan_interval",0.2);
     replan_distance_=declare_parameter("replan_distance",1.0);
     step_=declare_parameter("sample_step",0.02); stamp_clock_=declare_parameter("stamp_clock","ros");
     max_samples_=declare_parameter("output.max_samples",10000);

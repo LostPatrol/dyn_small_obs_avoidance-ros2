@@ -272,20 +272,18 @@ def test_external_index_throttle_and_invalid_indices(planner):
 
 @pytest.mark.parametrize('planner', [None], indirect=True)
 def test_default_interval_refreshes_without_cloud_or_index_advance(planner):
-    """Default 1 s refresh repeats a safe plan even with a stationary execution index."""
+    """Default 0.2 s refresh repeats a safe plan even with a stationary execution index."""
     p = planner
     p.observe()
     first = len(p.results)
     p.goal()
     initial = p.outcome(first, PlanResult.REACH_END)
-    p.index(0)
     first = len(p.results)
-    p.spin(.35)
-    assert len(p.results) == first
+    p.index(0)
     refreshed = p.outcome(first, PlanResult.REACH_END)
     elapsed = (refreshed.header.stamp.sec-initial.header.stamp.sec +
                (refreshed.header.stamp.nanosec-initial.header.stamp.nanosec)*1e-9)
-    assert 1.0 <= elapsed < 1.6
+    assert .19 <= elapsed < .6
     assert refreshed.goal_revision == initial.goal_revision
     # Result and Path travel on separate DDS topics; delivery order is not guaranteed.
     p.wait(lambda: len(p.paths) >= 2)

@@ -7,8 +7,8 @@ path_planning:
     planning_frame: odom
     # Hz, finite and positive (at most 1000): timer checks for replanning and input-loss diagnostics.
     planning_rate: 10.0
-    # Seconds, >0: replan after this time since the last attempt (1.0 gives nominal 1 Hz).
-    replan_interval: 1.0
+    # Seconds, >0: replan after this time since the last attempt (0.2 gives nominal 5 Hz).
+    replan_interval: 0.2
     # Metres, >0: replan when actual 3D position moves at least this far from the last attempt.
     replan_distance: 1.0
     # Seconds, >0: maximum steady-clock reception age for cloud and odometry.
