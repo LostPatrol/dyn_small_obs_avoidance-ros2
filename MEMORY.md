@@ -11,7 +11,7 @@
 
 # 部署
 
-- drone-new=.169，drone-refresh=.186；两机项目路径均/home/nvidia/dyn_small_obs_avoidance-ros2。目前机载生产版本仍为a0ed33c；普通原语净空证书修复待同步及Release重建，两机都需更新。
+- drone-new=.169，drone-refresh=.186；两机项目路径均/home/nvidia/dyn_small_obs_avoidance-ros2。净空证书代码24e518f已同步两机；169已完成Release安装及核心/DDS测试。186构建期间SSH断开，安装完成情况未核实；用户要求暂停操作186以供其他agent调试Odin，恢复操作后须核实库版本并补做安装节点验证。
 - /home/nvidia/down_samp_exe.py为现场独立点云发布者，不由本项目/桥自动启动；此前169配置为0.1m降采样、0.4m球形剔除、auto球心。二次blind_radius=0不等于完整输入链无近身剔除。
 
 # 未解决限制
