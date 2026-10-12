@@ -1,26 +1,22 @@
-<!-- 当前真实算法、服务适配和逐机部署；验证边界与关键历史。 -->
-# 当前基线与部署状态
+<!-- 当前有效算法、接口、逐机部署与开发前必须了解的限制；过程和日志只放报告。 -->
+# 当前基线
 
-- 2026-10-12按用户最新要求，在169当前旧算法上恢复Task38接口。`path_searching`整个目录与任务开始时169快照完全一致，没有恢复连续距离算法、轴向/合量搜索限值改写或新版搜索逻辑。当前原语最多42次采样（ceil(0.6×sqrt(3)×2/0.05)）。
-- 169当前源YAML：horizon=100、resolution=0.1、voxel_size=0.1、safe_distance=0.25、max_vel/max_acc=2、max_tau=0.6、collision_step=0.05、预算0.3s、input_timeout=0.5s。以本次实时源码及ROS读参为准，旧记忆中的20/0.2配置已失效。
-- 独立Odin入口仍默认订阅 `/odin1/cloud_slam_down`，receive时钟、下界[-50,-50,-2]、上界由YAML指定[50,50,10]；launch默认blind_radius=0覆盖YAML的0.3。源码缺省bounds为[-50,-50,0.2]/[50,50,5]，沿用169现场源码，不与实际启动参数混淆。
-- 新增 `PlanMotion` 兼容服务、service_only及完整桥快照替换，仅属于wrapper/独立MotionAdapter。PLAN原样调用旧search/getSegments；CHECK_LINE及剩余曲线检查离散调用旧isSafe，不提供连续净空证明。独立入口的50帧双树累计行为保持。
-- 主工程执行层保留PD+DOB、水平1/垂直0.2m/s与加速度0.35/0.15m/s²；超包线完整曲线按统一时间缩放放慢，空间路径不变，实际p/v接入及60s时长门槛不放宽。
-- drone-new=.169、drone-refresh=.186，两机路径均 `/home/nvidia/dyn_small_obs_avoidance-ros2`。两机已同步源码并原生构建；主工程共享接口恢复3.4，隔离ARM64控制/桥/服务适配测试及无FCU smoke通过。代理未重启原进程；用户收尾重启169后三个机载unit自动active，旧降采样/独立目标进程不在。
-- 两机现有 `/home/nvidia/down_samp_exe.py` 为独立点云发布者，不由桥自动启动；169实测0.1m降采样、0.4m球形剔除、auto球心。可能删除真实近身障碍，保持现场配置，不把0m二次盲区当作完整链路无剔除。
-- 同步前逐机备份 `/home/nvidia/ros2-ardupilot-maintenance/task38-restore-20261012/`；开发机169源快照和运行参数位于主工程 `agent/codex/task38-restore-20261012/169/`。逐机相机/Tag及/etc配置保留，没有实机解锁或起飞。
+- 独立入口已恢复ROS1事件重规划：goal在起点就绪时规划；有效点云更新后检查整个旧路径第0、40、80……点，受阻才规划；实际起点距目标<0.3m早退。失败保留旧路径及已置位replan_flag，成功才清标记。首次失败无旧路径、goal先于odom时不会自动补规划。planning_rate只控制输入失效诊断。
+- 独立入口先init=true、NO_PATH才init=false；内部旧路径检查/执行索引缓存按0.01s采样，公共输出仍由sample_step控制。launch默认将time_index映射到/demo_node/trajectory_time_index：有索引时绝对差<10节流，从旧路径index+3及差分速度规划；无索引用实际odom p/v。保留原作者整个旧路径检查、索引节流对新目标也生效等行为，仅防未初始化读取和确定越界。
+- path_searching仍为169选用的旧离散核心：普通原语最多42次采样（ceil(0.6×sqrt(3)×2/0.05)），没有引入连续距离求根或改写搜索限值。
+- 当前YAML：horizon=100、resolution=voxel_size=0.1、safe_distance=0.25、max_vel=max_acc=2、max_tau=0.6、collision_step=0.05、search_budget=0.3s、input_timeout=0.5s。参数在启动时复制，修改须重启。
+- Odin launch默认订阅/odin1/cloud_slam_down和/odin1/odometry，frame=odom、stamp_clock=receive、下界[-50,-50,-2]，上界来自YAML[50,50,10]；launch默认blind_radius=0覆盖YAML的0.3。勿混淆源码缺省bounds与实际启动覆盖。
+- PlanMotion服务保持原Task38接口：service_only关闭独立goal/cloud规划及诊断定时器；PLAN按请求实际p/v直接init=false搜索。正式桥使用latest_observation完整快照替换；独立入口仍50帧双树累计。CHECK_LINE/VALIDATE_TRAJECTORY离散调用旧isSafe，不提供连续净空证明。
+- 主工程接口3.4及执行层PD+DOB、水平1/垂直0.2m/s和加速度0.35/0.15m/s²保持；超包线完整曲线按统一时间缩放放慢，空间路径不变。本项目修复不修改主工程。
 
-# 未解决风险与验证边界
+# 部署
 
-- 核心19例18通过，旧 `Search.CollisionBetweenPrimitiveEndpoints` 仍失败：0.099990361693828175m < 0.1m。保留旧离散碰撞采样，不修算法、不降低测试阈值，不能宣称全量通过。
-- 新MotionAdapter四例、输出契约六例、服务真实DDS一例、原Python回归八例通过；两机ARM64几何/输出契约验证通过。主工程真实SITL六场景通过，不替代真实传感器、安装外参、长时热负载或实飞验收。
-- `/plan_result` 是独立入口每轮有效性依据；`/kino_path` 保留最后成功预览，不能直接执行旧预览。参数只在启动时复制，修改须重启。
-- 正式桥仍拒绝unknown与有效Tag修正，实际稀疏/近身覆盖可能使真实航线无法执行。上游球形剔除和旧碰撞采样均有边界，软件测试不能证明真实飞行净空。
+- drone-new=.169，drone-refresh=.186；两机项目路径均/home/nvidia/dyn_small_obs_avoidance-ros2。两机已同步d47a718功能提交并完成Jazzy/ARM64 Release构建，无遗漏机待补同步。
+- /home/nvidia/down_samp_exe.py为现场独立点云发布者，不由本项目/桥自动启动；此前169配置为0.1m降采样、0.4m球形剔除、auto球心。二次blind_radius=0不等于完整输入链无近身剔除。
 
-- 收尾实际阻塞：用户重启169后机载状态3.4、armed=false/IDLE、avoidance_ready=false；同domain0的cloud_slam和odometry_highfreq各2个发布者，down点云0个。186独立Odin仍运行。已停止实机联调，未自行停用户进程/改域/启动正式桥；现场使用须先隔离目标机定位数据源，再恢复该机降采样和避障输入。两机代码Git已同步621a2dc，主工程4e5d969；核心/功能源码hash一致。
+# 未解决限制
 
-# 关键历史
-
-- 2026-10-12早先回退到169的4119937加现场修改：开发机/186的备份在 `agent/codex/rollback-169-20261012-153708/`，186更早完整备份在 `/home/nvidia/ros2-ardupilot-maintenance/sync-from-169-20261012-1536/`。本次接口恢复取代“主工程3.3且无PlanMotion”的部署结论，旧核心选用仍有效。
-- 2026-10-10 Odin YAML优先修复已回退，历史报告不是当前入口行为。旧0.35m净空下起点近点诊断不能当作本次0.25m配置实飞验收。
-
+- 已知核心Search.CollisionBetweenPrimitiveEndpoints不通过：离散采样可能漏掉端点间碰撞。此次不改核心或降低阈值，不能宣称连续净空或全量核心测试通过。
+- 独立/kino_path是最后成功预览，不周期刷新；没有新PlanResult可能只是没有触发新规划。输入新鲜度和当前可执行性不能仅根据旧Path或最后一次成功判断。
+- 双树按输入帧累计而非墙钟到期，移动障碍可留残影；上游球形剔除会删除真实近身障碍。正式桥拒绝unknown及有效Tag修正，稀疏观察可使航线不可执行。
+- 两机处于同一ROS域且使用同名Odin话题时可能串流；调试必须先确认目标机数据源。隔离域回放与台架结果不能替代真实传感器长时负载或实飞验收。

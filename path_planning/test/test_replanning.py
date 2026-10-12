@@ -56,8 +56,14 @@ class PlannerProbe:
             self.spin(.02)
             if predicate():
                 return
-        assert predicate(), ([(r.status, r.detail, r.sequence) for r in self.results[-10:]],
-                             self.log_path.read_text())
+        # Later stale-input diagnostics must not hide the event's original search failure.
+        assert predicate(), {
+            'search_attempts': [(r.sequence, r.goal_revision, r.status, r.detail, r.planning_ms,
+                                 r.map_points) for r in self.results if r.planning_ms > 0],
+            'recent_results': [(r.sequence, r.goal_revision, r.status, r.detail, r.planning_ms)
+                               for r in self.results[-10:]],
+            'node_log': self.log_path.read_text(),
+        }
 
     def observe(self, points=((-20., -20., 1.),), position=(0., 0., 1.)):
         """Refresh actual state before the cloud event; its echo proves map ingestion occurred."""
@@ -110,6 +116,8 @@ def planner(tmp_path):
             exe, '--ros-args', '-p', 'planning_frame:=map', '-p', 'input_timeout:=2.0',
             '-p', 'stamp_clock:=receive', '-p', 'cloud.blind_radius:=0.0',
             '-p', 'search.tree_period:=1', '-p', 'search.safe_distance:=0.25',
+            # Match the deployed YAML budget; the library's 0.08 s default times out on ARM64.
+            '-p', 'search.search_budget:=0.3',
             '-p', 'search.voxel_size:=0.1', '-p', 'sample_step:=0.02',
             '-r', 'time_index:=/demo_node/trajectory_time_index',
         ], stdout=log, stderr=log)
