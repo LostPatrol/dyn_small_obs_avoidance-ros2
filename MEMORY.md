@@ -14,7 +14,8 @@
 # 部署
 
 - KT_HORIZON对应search.tree_period，当前YAML及C++默认均为20；已同步drone-refresh(.186)及drone-new(.169)源码和Release安装目录，下次启动生效。
-- 当前原生目标生命周期、方向动力学限额及删除桥profile的源码/接口/安装资产仅在开发机更新，**refresh和new均未同步此基线**；同步任一机时须同时同步主工程桥与重建接口消费者。此前公共launch优先级版本已在refresh，下次同步new也需补齐。
+- 当前原生目标生命周期、方向动力学限额及删除桥profile的源码/接口/安装资产已在开发机和hp-desktop更新，**refresh和new均未同步此基线**；同步任一机时须同时同步主工程桥与重建接口消费者。此前公共launch优先级版本已在refresh，下次同步new也需补齐。
+- hp-desktop已于2026-10-13同步b527fbc及主工程62ce78e，原生Release重建独立库、桥、共享接口及控制消费者；当前新基线也可在笔记本使用。工作区为`/home/scq/dyn_small_obs_avoidance-ros2`，旧源码与安装归档在`/home/scq/backups/code-sync-20261013/`。
 
 - drone-new=.169，drone-refresh=.186；两机项目路径均/home/nvidia/dyn_small_obs_avoidance-ros2。净空证书代码24e518f已同步两机，均完成Release安装、核心/DDS测试及固定现场点云节点回放，安装核心库SHA256一致。186曾出现源码空文件及损坏构建缓存，已恢复；同步时须核实实际源码与安装库，不能仅看Git HEAD。持续传感器CPU量化复测未记录。
 - 时间/位移重规划3bce7ae及DDS测试90024ae已同步两机；当前默认参数replan_interval=0.2s、replan_distance=1.0m，C++默认及YAML已同步两机并完成Release安装。
