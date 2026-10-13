@@ -62,8 +62,8 @@ path_planning:
     search.vertical_distance_weight: 10.0
     # Meters, >0: displacement from start that permits a partial REACH_HORIZON result, not path length.
     search.horizon: 100.0
-    # Positive heuristic weight; larger favors heuristic-directed expansion, not guaranteed optimality.
-    search.lambda_heu: 5.0
+    # Positive heuristic weight; 1 reduces greedy detours, without guaranteeing optimality.
+    search.lambda_heu: 1.0
     # Meters, >0: position hash cell size; distinct velocities can be merged within a spatial cell.
     search.resolution: 0.1
     # Seconds, >0: hash time-bin width for core dynamic=true; unused by the current ROS wrapper.

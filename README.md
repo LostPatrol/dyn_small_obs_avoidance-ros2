@@ -124,8 +124,9 @@ Primitives and terminal cubic candidates include this cost. The added height-dif
 heuristic is temporarily disabled because it caused repeated vertical reversals.
 Set it to `0.0` for legacy behavior (also the bare C++/node default); restart after changing it.
 This is a soft preference, not a height constraint or a fix for incorrect state coordinates.
-Search uses `lambda_heu=5` and a single `1.0001` tie factor (effective heuristic multiplier
-`5.0005`). The half-speed duration estimate and position-only hash do not guarantee an
+Search defaults to `lambda_heu=1` to reduce greedy detours, with a single `1.0001` tie factor
+(effective heuristic multiplier `1.0001`). Explicit YAML and CLI values still override the default.
+The half-speed duration estimate and position-only hash do not guarantee an
 admissible heuristic or an optimal path.
 
 ## 5. Documentation

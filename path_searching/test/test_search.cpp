@@ -248,7 +248,8 @@ TEST(Search, HorizonIsPartialAndDynamicIndexIsDefined) {
 // A near-goal direct shot never exercises dynamic hashing. Force real expansions and revisit
 // a position cell at multiple times; dynamic still uses the unchanged spatial collision map.
 TEST(Search, DynamicSearchRetainsMultipleTimesInOnePositionCell) {
-  auto c=config(); c.horizon=0.2; c.time_resolution=0.04;
+  // An exact binary bin makes division and reciprocal multiplication agree at boundaries.
+  auto c=config(); c.horizon=0.2; c.time_resolution=1.0/32.0;
   KinodynamicAstar k(c); ASSERT_TRUE(k.setKdtree(background()));
   constexpr double origin=12.3;
   ASSERT_EQ(k.search({0,0,1},{0,0,0},{0,0,0},{4,0,1},{0,0,0},true,true,origin),
@@ -289,7 +290,8 @@ TEST(Search, DefaultLatticeAndLastPoolSlotAreUsable) {
 TEST(Search, SmallPositiveParametersRespectAccelerationAndTwentyInitialDurations) {
   for (double initial_duration:{0.8,1e-6}) {
     auto c=config(); c.max_acc=1e-4; c.init_max_tau=initial_duration;
-    c.time_resolution=initial_duration/40; c.horizon=0.1;
+    // Stop after the root expansion, before later search can reparent these initial candidates.
+    c.time_resolution=initial_duration/40; c.horizon=initial_duration/100;
     KinodynamicAstar k(c); ASSERT_TRUE(k.setKdtree(background()));
     ASSERT_EQ(k.search({0,0,1},{1,0,0},{1e-4,-1e-4,0},{4,0,1},{0,0,0},true,true),
               KinodynamicAstar::REACH_HORIZON);

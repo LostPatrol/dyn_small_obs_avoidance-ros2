@@ -20,8 +20,8 @@ struct SearchConfig {
   // Horizontal vector norm and vertical absolute limits (m/s and m/s²). Scalar caps also apply.
   double max_vel_xy = 1.0, max_vel_z = 0.2, max_acc_xy = 2.0, max_acc_z = 2.0;
   // Cost integrates squared acceleration + w_time; horizon is displacement from start (m).
-  // lambda_heu weights the upstream heuristic, so global optimality is not guaranteed.
-  double w_time = 10.0, horizon = 100.0, lambda_heu = 5.0;
+  // A lower heuristic weight reduces greedy detours; global optimality is still not guaranteed.
+  double w_time = 10.0, horizon = 100.0, lambda_heu = 1.0;
   // Extra cost per metre of accumulated vertical travel; zero preserves legacy search behavior.
   double vertical_distance_weight = 0.0;
   // Spatial hash cell size (m); time hash bin size (s), used only with dynamic=true.
