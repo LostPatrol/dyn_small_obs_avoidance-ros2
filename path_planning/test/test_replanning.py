@@ -326,6 +326,7 @@ def test_elapsed_refresh_shortens_path_after_obstacle_disappears(planner):
                abs(t.transforms[0].translation.z-1.) < 1e-6 for t in refreshed.trajectory.points)
 
 @pytest.mark.parametrize('planner', [{'replan_interval': .2,
+                                     'search.vertical_distance_weight': 10.,
                                      'search.max_vel': 1., 'search.max_acc': 2.,
                                      'search.max_vel_xy': 1., 'search.max_vel_z': .2,
                                      'search.max_acc_xy': 2., 'search.max_acc_z': 2.}], indirect=True)

@@ -108,6 +108,12 @@ candidate exceeds its speed cap from rest, its five controls sample the feasible
 negative acceleration intervals using current velocity and duration. Other axes retain the
 original lattice. This preserves nonzero Z candidates without trajectory retiming.
 
+The shared YAML enables `search.vertical_distance_weight: 10.0`: each metre of accumulated
+up/down travel adds 10 cost units, favouring horizontal detours when other costs are similar.
+Primitives, the height-difference heuristic and terminal cubic candidates include this cost.
+Set it to `0.0` for legacy behavior (also the bare C++/node default); restart after changing it.
+This is a soft preference, not a height constraint or a fix for incorrect state coordinates.
+
 ## 5. Documentation
 
 - [Detailed usage, visualization and replay guide (Chinese)](docs/USAGE.md)

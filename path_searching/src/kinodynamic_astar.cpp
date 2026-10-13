@@ -28,6 +28,8 @@ constexpr double kNearestDistanceSlack = 8 * std::numeric_limits<float>::epsilon
 }  // namespace
 
 void SearchConfig::validate() const {
+  if (!std::isfinite(vertical_distance_weight) || vertical_distance_weight < 0)
+    throw std::invalid_argument("vertical_distance_weight must be finite and nonnegative");
   for (double v : {max_tau, init_max_tau, max_vel, max_acc, max_vel_xy, max_vel_z, max_acc_xy, max_acc_z, w_time, horizon, lambda_heu,
                    resolution, time_resolution, safe_distance, voxel_size, collision_step, search_budget})
     if (!std::isfinite(v) || v <= 0) throw std::invalid_argument("search parameters must be finite and positive");
@@ -201,12 +203,27 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
     expanded_nodes_.insert(cur_node->index, cur_node);
 
   PathNodePtr terminate_node = NULL;
+  // Keep a checked complete candidate while weighted A* considers cheaper frontier entries.
+  PathNodePtr best_terminal = nullptr;
+  Eigen::Matrix<double, 3, 4> best_shot;
+  double best_duration = 0.0, best_cost = std::numeric_limits<double>::infinity();
+  const bool prefer_horizontal = config_.vertical_distance_weight > 0;
+  // Restore an owning coefficient copy; subsequent shot attempts overwrite the core's scratch.
+  const auto finish = [&](int failure) {
+    if (best_terminal) {
+      retrievePath(best_terminal);
+      coef_shot_ = best_shot; t_shot_ = best_duration; is_shot_succ_ = true;
+      return int(REACH_END);
+    }
+    reset();
+    return failure;
+  };
   bool init_search = init;
   const int tolerance = ceil(kNearGoalDistanceMeters / resolution_);
 
   while (!open_set_.empty())
   {
-    if (std::chrono::steady_clock::now() >= deadline_) { reset(); return TIMEOUT; }
+    if (std::chrono::steady_clock::now() >= deadline_) return finish(TIMEOUT);
     // A decreased score creates another queue entry; discard old snapshots before expanding.
     const auto entry = open_set_.top();
     cur_node = entry.node;
@@ -214,6 +231,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
       open_set_.pop();
       continue;
     }
+    if (best_terminal && entry.score >= best_cost) return finish(REACH_END);
     bool reach_horizon = (cur_node->state.head(3) - start_pt).norm() >= horizon_;
     bool near_end = abs(cur_node->index(0) - end_index(0)) <= tolerance &&
                     abs(cur_node->index(1) - end_index(1)) <= tolerance &&
@@ -229,16 +247,26 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
         estimateHeuristic(cur_node->state, end_state, time_to_goal);
         // The upstream heuristic time ignores derivative constraints. Retry the same cubic
         // boundary-value connection at longer durations, never accept an over-limit shot.
+        is_shot_succ_ = false;
         for (double scale : kShotDurationScales) {
-          if (computeShotTraj(cur_node->state, end_state, time_to_goal * scale)) break;
+          if (computeShotTraj(cur_node->state, end_state, time_to_goal * scale)) {
+            if (!prefer_horizontal) break;
+            const double cost = cur_node->g_score + shotCost();
+            if (cost < best_cost) {
+              best_terminal = cur_node; best_shot = coef_shot_;
+              best_duration = t_shot_; best_cost = cost;
+            }
+          }
+          if (std::chrono::steady_clock::now() >= deadline_) break;
         }
-        if (std::chrono::steady_clock::now() >= deadline_) { reset(); return TIMEOUT; }
+        if (std::chrono::steady_clock::now() >= deadline_) return finish(TIMEOUT);
       }
 
     }
     if (reach_horizon)
     {
-      if (is_shot_succ_)
+      if (best_terminal) return finish(REACH_END);
+      if (is_shot_succ_ && !prefer_horizontal)
       {
         return REACH_END;
       }
@@ -250,13 +278,14 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
 
     if (near_end)
     {
-      if (is_shot_succ_)
+      if (is_shot_succ_ && !prefer_horizontal)
       {
         return REACH_END;
       }
     }
     // A rejected near-goal shot must not leave a candidate path visible as a successful result.
     path_nodes_.clear();
+    is_shot_succ_ = false;
     open_set_.pop();
     cur_node->node_state = IN_CLOSE_SET;
     iter_num_ += 1;
@@ -308,7 +337,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
       for (std::size_t j = 0; j < durations.size(); ++j)
       {
         um = inputs[i];
-        if (std::chrono::steady_clock::now() >= deadline_) { reset(); return TIMEOUT; }
+        if (std::chrono::steady_clock::now() >= deadline_) return finish(TIMEOUT);
         if (!um.allFinite() || !withinAcceleration(um)) continue;
         double tau = durations[j];
         stateTransit(cur_state, pro_state, um, tau);
@@ -362,13 +391,16 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
         if (!isPrimitiveSafe(cur_state, um, 0, tau, primitive_start_distance,
                              primitiveClearance(pro_pos)))
         {
-            if (std::chrono::steady_clock::now() >= deadline_) { reset(); return TIMEOUT; }
+            if (std::chrono::steady_clock::now() >= deadline_) return finish(TIMEOUT);
             continue;
         }
 
         // Accumulated control-effort/time cost plus the weighted upstream terminal-cost heuristic.
         double time_to_goal, tmp_g_score, tmp_f_score;
         tmp_g_score = (um.squaredNorm() + w_time_) * tau + cur_node->g_score;
+        if (prefer_horizontal)
+          tmp_g_score += config_.vertical_distance_weight *
+              verticalTravel({cur_state(5), 0.5 * um.z(), 0.0}, tau);
         tmp_f_score = tmp_g_score + lambda_heu_ * estimateHeuristic(pro_state, end_state, time_to_goal);
         bool prune = false;
         for (std::size_t j = 0; j < tmp_expand_nodes.size(); ++j)
@@ -395,7 +427,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
         {
           if (pro_node == NULL)
           {
-            if (use_node_num_ >= allocate_num_) { reset(); return NODE_LIMIT; }
+            if (use_node_num_ >= allocate_num_) return finish(NODE_LIMIT);
             pro_node = path_node_pool_[use_node_num_];
             pro_node->index = pro_id;
             pro_node->state = pro_state;
@@ -440,7 +472,7 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
         }
       }
   }
-  return NO_PATH;
+  return finish(NO_PATH);
 }
 
 // Parent links run backwards; expose an ordered start-to-terminal sequence without copying nodes.
@@ -500,7 +532,41 @@ double KinodynamicAstar::estimateHeuristic(Eigen::VectorXd x1, Eigen::VectorXd x
 
   optimal_time = t_d;
 
-  return 1.0 * (1 + tie_breaker_) * cost;
+  // Net height difference is a lower bound on remaining accumulated vertical travel.
+  return (1 + tie_breaker_) * cost + config_.vertical_distance_weight * std::abs(dp.z());
+}
+
+// Integrate |vz| analytically by summing displacement between its zero crossings.
+double KinodynamicAstar::verticalTravel(const Eigen::Vector3d& c, double duration) {
+  const auto displacement = [&](double t) { return ((c.z() * t + c.y()) * t + c.x()) * t; };
+  if (c.z() == 0.0) {
+    const double end = displacement(duration);
+    const double stop = c.y() != 0.0 ? -c.x() / (2 * c.y()) : -1.0;
+    if (stop > 0.0 && stop < duration) {
+      const double turn = displacement(stop);
+      return std::abs(turn) + std::abs(end - turn);
+    }
+    return std::abs(end);
+  }
+  auto turns = cubic(0.0, 3 * c.z() * duration * duration, 2 * c.y() * duration, c.x());
+  turns.push_back(1.0);
+  std::sort(turns.begin(), turns.end());
+  double travel = 0.0, previous = 0.0;
+  for (double u : turns) {
+    if (u <= 0.0 || u > 1.0) continue;
+    const double position = displacement(u * duration);
+    travel += std::abs(position - previous);
+    previous = position;
+  }
+  return travel;
+}
+
+// Acceleration is affine, so its squared norm has an exact endpoint integral.
+double KinodynamicAstar::shotCost() {
+  const Eigen::Vector3d first = 2 * coef_shot_.col(2);
+  const Eigen::Vector3d last = first + 6 * coef_shot_.col(3) * t_shot_;
+  return t_shot_ * ((first.squaredNorm() + first.dot(last) + last.squaredNorm()) / 3 + w_time_) +
+      config_.vertical_distance_weight * verticalTravel(coef_shot_.row(2).tail<3>().transpose(), t_shot_);
 }
 
 // Linear primitive velocity has a convex norm, so endpoint checks cover its entire duration.

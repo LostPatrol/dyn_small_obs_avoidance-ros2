@@ -88,12 +88,84 @@ TEST(Search, MissingEmptyInvalidAndOversizedClouds) {
   EXPECT_FALSE(k.setKdtree(c)); EXPECT_FALSE(k.mapReady());
 }
 TEST(Search, InvalidParametersAndStates) {
+  auto invalid_weight=config(); invalid_weight.vertical_distance_weight=-1;
+  EXPECT_THROW(KinodynamicAstar k(invalid_weight),std::invalid_argument);
+  invalid_weight.vertical_distance_weight=std::numeric_limits<double>::quiet_NaN();
+  EXPECT_THROW(KinodynamicAstar k(invalid_weight),std::invalid_argument);
   auto c=config(); c.max_acc=0; EXPECT_THROW(KinodynamicAstar k(c),std::invalid_argument);
   c=config(); c.lower.z()=c.upper.z(); EXPECT_THROW(KinodynamicAstar k(c),std::invalid_argument);
   KinodynamicAstar k(config()); k.setKdtree(background());
   EXPECT_EQ(plan(k,{0,0,-1}),KinodynamicAstar::INVALID_INPUT);
   EXPECT_EQ(plan(k,{0,0,1},{4,0,1},{0,0,3}),KinodynamicAstar::INVALID_INPUT);
   EXPECT_THROW(k.sampleTrajectory(0),std::invalid_argument);
+}
+
+// Compare two feasible detours under the deployed directional limits, without changing clearance.
+TEST(Search, VerticalTravelCostPrefersHorizontalDetourAndRetainsVerticalEscape) {
+  pcl::PointCloud<pcl::PointXYZ> cloud;
+  for (int y=-12;y<=12;++y)
+    for (int z=-4;z<=4;++z)
+      cloud.push_back({2.0f,float(y*0.05),float(1+z*0.05)});
+  SearchConfig legacy;
+  KinodynamicAstar original(legacy); ASSERT_TRUE(original.setKdtree(cloud));
+  ASSERT_EQ(original.search({0,0,1},{0,0,0},{0,0,0},{4,0,1},{0,0,0},true),KinodynamicAstar::REACH_END);
+  double original_travel=0,previous=1;
+  for (const auto& s:original.sampleTrajectory(0.002)) {
+    original_travel+=std::abs(s.position.z()-previous); previous=s.position.z();
+  }
+  EXPECT_GT(original_travel,0.5);
+  auto preferred=legacy; preferred.vertical_distance_weight=10;
+  KinodynamicAstar horizontal(preferred); ASSERT_TRUE(horizontal.setKdtree(cloud));
+  ASSERT_EQ(horizontal.search({0,0,1},{0,0,0},{0,0,0},{4,0,1},{0,0,0},true),KinodynamicAstar::REACH_END);
+  double lateral=0;
+  for (const auto& s:horizontal.sampleTrajectory(0.002)) {
+    EXPECT_NEAR(s.position.z(),1,1e-9);
+    lateral=std::max(lateral,std::abs(s.position.y()));
+  }
+  EXPECT_GT(lateral,0.85);
+  validate(horizontal,cloud,{4,0,1});
+  // A wall across the allowed width leaves only a vertical detour, which must remain available.
+  preferred.lower.y()=-0.5; preferred.upper.y()=0.5;
+  KinodynamicAstar vertical(preferred); ASSERT_TRUE(vertical.setKdtree(cloud));
+  ASSERT_EQ(vertical.search({0,0,1},{0,0,0},{0,0,0},{4,0,1},{0,0,0},true),KinodynamicAstar::REACH_END);
+  double excursion=0;
+  for (const auto& s:vertical.sampleTrajectory(0.002))
+    excursion=std::max(excursion,std::abs(s.position.z()-1));
+  EXPECT_GT(excursion,0.4);
+  validate(vertical,cloud,{4,0,1});
+}
+
+// Check accumulated primitive cost against numerical |vz| integration, including a reversal.
+TEST(Search, VerticalTravelCostCountsBothSidesOfPrimitiveTurnaround) {
+  auto c=config(); c.vertical_distance_weight=10; c.horizon=0.05;
+  KinodynamicAstar planner(c); ASSERT_TRUE(planner.setKdtree(background()));
+  ASSERT_EQ(planner.search({0,0,1},{0.5,0,0.2},{0,0,-1},{4,0,1},{0,0,0},true),
+            KinodynamicAstar::REACH_HORIZON);
+  bool saw_reversal=false;
+  for (const auto node:planner.getVisitedNodes()) {
+    if (!node->parent) continue;
+    const double vz=node->parent->state(5),az=node->input.z(),dt=node->duration/2000;
+    double travel=0;
+    for (int i=0;i<2000;++i) travel+=std::abs(vz+az*(i+0.5)*dt)*dt;
+    saw_reversal|=vz*(vz+az*node->duration)<0;
+    const double expected=node->parent->g_score+(node->input.squaredNorm()+c.w_time)*node->duration+
+        c.vertical_distance_weight*travel;
+    EXPECT_NEAR(node->g_score,expected,1e-5);
+  }
+  EXPECT_TRUE(saw_reversal);
+}
+
+// A horizontal direct connection stays level; moving starts retain their physical vertical speed.
+TEST(Search, VerticalTravelCostPreservesShotBoundaryStates) {
+  SearchConfig c; c.vertical_distance_weight=10;
+  KinodynamicAstar planner(c); ASSERT_TRUE(planner.setKdtree(background()));
+  for (double vz:{0.0,0.1}) {
+    ASSERT_EQ(planner.search({0,0,1},{0,0,vz},{0,0,0},{1,0,1},{0,0,0},true),KinodynamicAstar::REACH_END);
+    const auto samples=planner.sampleTrajectory(0.002);
+    ASSERT_FALSE(samples.empty()); EXPECT_NEAR(samples.front().velocity.z(),vz,1e-12);
+    if (vz==0) for (const auto& s:samples) EXPECT_NEAR(s.position.z(),1,1e-12);
+    validate(planner,background(),{1,0,1});
+  }
 }
 TEST(Search, BlockedStartAndGoalInvalidatePreviousPath) {
   KinodynamicAstar k(config()); auto c=background(); k.setKdtree(c); ASSERT_EQ(plan(k),KinodynamicAstar::REACH_END);

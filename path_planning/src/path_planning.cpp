@@ -45,6 +45,7 @@ class Planner : public rclcpp::Node {
     SearchConfig c;
 #define PARAM(field) c.field = declare_parameter("search." #field, c.field)
     PARAM(max_tau); PARAM(init_max_tau); PARAM(max_vel); PARAM(max_acc); PARAM(w_time);
+    PARAM(vertical_distance_weight);
     // Scalar ROS overrides remain shorthand; explicit directional values are more specific.
     const auto& overrides=get_node_parameters_interface()->get_parameter_overrides();
     if (overrides.count("search.max_vel")) c.max_vel_xy=c.max_vel_z=c.max_vel;

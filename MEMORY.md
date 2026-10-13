@@ -1,6 +1,8 @@
 <!-- 当前有效算法、接口、逐机部署与开发前必须了解的限制；过程和日志只放报告。 -->
 # 当前基线
 
+- 竖直绕行偏好：公共 `planner.yaml` 启用 `search.vertical_distance_weight=10.0`，裸core/节点默认0保持旧行为。代价增加 `weight*∫|vz|dt`，普通原语和shot按速度零点精确累计上下路程；启发式加 `weight*abs(goal.z-z)`。启用时比较既有shot时长候选的完整代价，并将完整候选与加权搜索队列比较；预算/节点耗尽已有完整可行候选则返回该候选，否则仍失败。既有lambda=5和position-only hash保留，不保证全局最优或随权重单调变平。修改参数须重启；不解决坐标偏差、盲区或输入上升速度形成的拱形。
+
 - 独立入口保留goal和旧路径受阻事件；额外在距上次实际尝试经过replan_interval秒（默认0.2，名义5Hz），或实际三维位置变化>=replan_distance米（默认1）时重规划。时间/位移触发从实际odom p/v规划，绕过执行索引节流；每次尝试包括失败均重置时间/位移基准。planning_rate默认10Hz控制定时检查及输入失效诊断。输入有效后可补首次规划或重试初次失败；实际起点距目标<0.3m仅在成功曲线仍有效时早退；原生失败/输入故障撤销后，恢复允许一次actual状态规划，后续失败再按既有时间重试。
 - 上游是HKU-MARS dyn_small_obs_avoidance，不是hubernikus的Python速度调制库。d47a718恢复ROS1事件策略；3bce7ae加入时间/位移刷新，使旧绕行在地图中障碍淘汰后可自动缩短。仍按旧路径第0、40、80……点检查碰撞，失败保留旧路径及已置位replan_flag，成功才清标记。
 - 独立入口先init=true、NO_PATH才init=false；内部旧路径检查/执行索引缓存按0.01s采样，公共输出仍由sample_step控制。launch默认将time_index映射到/demo_node/trajectory_time_index：原goal/受阻事件有索引时绝对差<10节流，从旧路径index+3及差分速度规划；新增时间/位移触发及无索引时用实际odom p/v。仅防未初始化读取和确定越界。
@@ -14,12 +16,12 @@
 # 部署
 
 - KT_HORIZON对应search.tree_period，当前YAML及C++默认均为20；已同步drone-refresh(.186)及drone-new(.169)源码和Release安装目录，下次启动生效。
-- 当前原生目标生命周期、方向动力学限额及删除桥profile的源码/接口/安装资产已在开发机和hp-desktop更新，**refresh和new均未同步此基线**；同步任一机时须同时同步主工程桥与重建接口消费者。此前公共launch优先级版本已在refresh，下次同步new也需补齐。
+- 原生目标生命周期、方向动力学限额及删除桥profile已在开发机、refresh和hp-desktop更新；new仍待同步此基线和主工程接口消费者。新增竖直路程代价已在开发机、refresh原生构建并安装；refresh保留现场边界 `[-20,-20,0.2]..[20,20,2]`，安装配置权重10已隔离读回，生产避障未运行，下次正常启动生效。new与hp-desktop仍待同步本次竖直代价。
 - hp-desktop已于2026-10-13同步b527fbc及主工程62ce78e，原生Release重建独立库、桥、共享接口及控制消费者；当前新基线也可在笔记本使用。工作区为`/home/scq/dyn_small_obs_avoidance-ros2`，旧源码与安装归档在`/home/scq/backups/code-sync-20261013/`。
 
 - drone-new=.169，drone-refresh=.186；两机项目路径均/home/nvidia/dyn_small_obs_avoidance-ros2。净空证书代码24e518f已同步两机，均完成Release安装、核心/DDS测试及固定现场点云节点回放，安装核心库SHA256一致。186曾出现源码空文件及损坏构建缓存，已恢复；同步时须核实实际源码与安装库，不能仅看Git HEAD。持续传感器CPU量化复测未记录。
 - 时间/位移重规划3bce7ae及DDS测试90024ae已同步两机；当前默认参数replan_interval=0.2s、replan_distance=1.0m，C++默认及YAML已同步两机并完成Release安装。
-- /home/nvidia/down_samp_exe.py为现场独立点云发布者，不由本项目/桥自动启动；此前169配置为0.1m降采样、0.4m球形剔除、auto球心。二次blind_radius=0不等于完整输入链无近身剔除。
+- 当前两机由Odin host SDK直接发布cloud_slam_down（0.1m降采样、0.4m近身剔除、auto球心），独立Python已退出生产链；二次blind_radius=0不等于完整输入链无近身剔除。驱动逐机实际运行状态以主工程MEMORY和现场进程为准。
 
 # 未解决限制
 

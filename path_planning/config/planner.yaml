@@ -57,6 +57,9 @@ path_planning:
     search.max_acc_z: 2.0  # m/s²
     # Positive time penalty in integral(||acceleration||² + w_time) dt; larger favors shorter durations.
     search.w_time: 10.0
+    # Extra cost per metre of accumulated up/down travel; 0 restores the legacy search.
+    # With w_time=10, one vertical metre adds the same cost as one second of time.
+    search.vertical_distance_weight: 10.0
     # Meters, >0: displacement from start that permits a partial REACH_HORIZON result, not path length.
     search.horizon: 100.0
     # Positive heuristic weight; larger favors heuristic-directed expansion, not guaranteed optimality.

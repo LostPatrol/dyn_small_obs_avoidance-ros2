@@ -22,6 +22,8 @@ struct SearchConfig {
   // Cost integrates squared acceleration + w_time; horizon is displacement from start (m).
   // lambda_heu weights the upstream heuristic, so global optimality is not guaranteed.
   double w_time = 10.0, horizon = 100.0, lambda_heu = 5.0;
+  // Extra cost per metre of accumulated vertical travel; zero preserves legacy search behavior.
+  double vertical_distance_weight = 0.0;
   // Spatial hash cell size (m); time hash bin size (s), used only with dynamic=true.
   double resolution = 0.1, time_resolution = 0.8;
   // Clearance (m), voxel edge (m), terminal-shot collision-sampling travel interval (m).
@@ -201,6 +203,10 @@ class KinodynamicAstar {
   bool withinVelocity(const Eigen::Vector3d& value) const;
   bool withinAcceleration(const Eigen::Vector3d& value) const;
   bool computeShotTraj(Eigen::VectorXd start, Eigen::VectorXd end, double duration);
+  /// Exact vertical travel, split at velocity zeros; coefficients are v0, a0/2 and jerk/6.
+  double verticalTravel(const Eigen::Vector3d& coefficients, double duration);
+  /// Integral of squared acceleration, time and vertical travel for a terminal cubic.
+  double shotCost();
   double estimateHeuristic(Eigen::VectorXd start, Eigen::VectorXd end, double& duration);
   void stateTransit(Eigen::Matrix<double, 6, 1>& start, Eigen::Matrix<double, 6, 1>& end,
                     Eigen::Vector3d acceleration, double duration);
