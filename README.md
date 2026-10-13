@@ -110,7 +110,8 @@ original lattice. This preserves nonzero Z candidates without trajectory retimin
 
 The shared YAML enables `search.vertical_distance_weight: 10.0`: each metre of accumulated
 up/down travel adds 10 cost units, favouring horizontal detours when other costs are similar.
-Primitives, the height-difference heuristic and terminal cubic candidates include this cost.
+Primitives and terminal cubic candidates include this cost. The added height-difference
+heuristic is temporarily disabled because it caused repeated vertical reversals.
 Set it to `0.0` for legacy behavior (also the bare C++/node default); restart after changing it.
 This is a soft preference, not a height constraint or a fix for incorrect state coordinates.
 

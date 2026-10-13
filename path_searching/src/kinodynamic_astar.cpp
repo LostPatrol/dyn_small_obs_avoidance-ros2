@@ -532,8 +532,10 @@ double KinodynamicAstar::estimateHeuristic(Eigen::VectorXd x1, Eigen::VectorXd x
 
   optimal_time = t_d;
 
-  // Net height difference is a lower bound on remaining accumulated vertical travel.
-  return (1 + tie_breaker_) * cost + config_.vertical_distance_weight * std::abs(dp.z());
+  double heuristic = (1 + tie_breaker_) * cost;
+  // Temporarily disabled: weighted endpoint-height attraction caused repeated vertical reversals.
+  // heuristic += config_.vertical_distance_weight * std::abs(dp.z());
+  return heuristic;
 }
 
 // Integrate |vz| analytically by summing displacement between its zero crossings.

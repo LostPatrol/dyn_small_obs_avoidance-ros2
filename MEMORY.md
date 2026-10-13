@@ -1,7 +1,7 @@
 <!-- 当前有效算法、接口、逐机部署与开发前必须了解的限制；过程和日志只放报告。 -->
 # 当前基线
 
-- 竖直绕行偏好：公共 `planner.yaml` 启用 `search.vertical_distance_weight=10.0`，裸core/节点默认0保持旧行为。代价增加 `weight*∫|vz|dt`，普通原语和shot按速度零点精确累计上下路程；启发式加 `weight*abs(goal.z-z)`。启用时比较既有shot时长候选的完整代价，并将完整候选与加权搜索队列比较；预算/节点耗尽已有完整可行候选则返回该候选，否则仍失败。既有lambda=5和position-only hash保留，不保证全局最优或随权重单调变平。修改参数须重启；不解决坐标偏差、盲区或输入上升速度形成的拱形。
+- 竖直绕行偏好：公共 `planner.yaml` 启用 `search.vertical_distance_weight=10.0`，裸core/节点默认0保持旧行为。代价增加 `weight*∫|vz|dt`，普通原语和shot按速度零点精确累计上下路程；新增高度差启发项 `weight*abs(goal.z-z)` 因诱发目标高度附近周期反向已暂时注释，仅保留原启发式。启用时比较既有shot时长候选的完整代价，并将完整候选与加权搜索队列比较；预算/节点耗尽已有完整可行候选则返回该候选，否则仍失败。既有lambda=5和position-only hash保留，不保证全局最优或随权重单调变平。修改参数须重启；不解决坐标偏差、盲区或输入上升速度形成的拱形。
 
 - 独立入口保留goal和旧路径受阻事件；额外在距上次实际尝试经过replan_interval秒（默认0.2，名义5Hz），或实际三维位置变化>=replan_distance米（默认1）时重规划。时间/位移触发从实际odom p/v规划，绕过执行索引节流；每次尝试包括失败均重置时间/位移基准。planning_rate默认10Hz控制定时检查及输入失效诊断。输入有效后可补首次规划或重试初次失败；实际起点距目标<0.3m仅在成功曲线仍有效时早退；原生失败/输入故障撤销后，恢复允许一次actual状态规划，后续失败再按既有时间重试。
 - 上游是HKU-MARS dyn_small_obs_avoidance，不是hubernikus的Python速度调制库。d47a718恢复ROS1事件策略；3bce7ae加入时间/位移刷新，使旧绕行在地图中障碍淘汰后可自动缩短。仍按旧路径第0、40、80……点检查碰撞，失败保留旧路径及已置位replan_flag，成功才清标记。
@@ -16,7 +16,7 @@
 # 部署
 
 - KT_HORIZON对应search.tree_period，当前YAML及C++默认均为20；已同步drone-refresh(.186)及drone-new(.169)源码和Release安装目录，下次启动生效。
-- 原生目标生命周期、方向动力学限额及删除桥profile已在开发机、refresh和hp-desktop更新；new仍待同步此基线和主工程接口消费者。新增竖直路程代价已在开发机、refresh原生构建并安装；refresh保留现场边界 `[-20,-20,0.2]..[20,20,2]`，安装配置权重10已隔离读回，生产避障未运行，下次正常启动生效。new与hp-desktop仍待同步本次竖直代价。
+- 原生目标生命周期、方向动力学限额及删除桥profile已在开发机、refresh和hp-desktop更新；new仍待同步此基线和主工程接口消费者。新增竖直路程代价已在开发机、refresh原生构建并安装；refresh保留现场边界 `[-20,-20,0.2]..[20,20,2]`，安装配置权重仍为10；高度差启发项已关闭并重启refresh独立规划器。new与hp-desktop仍待同步竖直代价及此次启发项关闭。
 - hp-desktop已于2026-10-13同步b527fbc及主工程62ce78e，原生Release重建独立库、桥、共享接口及控制消费者；当前新基线也可在笔记本使用。工作区为`/home/scq/dyn_small_obs_avoidance-ros2`，旧源码与安装归档在`/home/scq/backups/code-sync-20261013/`。
 
 - drone-new=.169，drone-refresh=.186；两机项目路径均/home/nvidia/dyn_small_obs_avoidance-ros2。净空证书代码24e518f已同步两机，均完成Release安装、核心/DDS测试及固定现场点云节点回放，安装核心库SHA256一致。186曾出现源码空文件及损坏构建缓存，已恢复；同步时须核实实际源码与安装库，不能仅看Git HEAD。持续传感器CPU量化复测未记录。
