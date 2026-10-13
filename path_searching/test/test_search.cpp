@@ -1,6 +1,7 @@
 // Core regression tests use raw point geometry, not the planner's collision predicate, as the oracle.
 #include <gtest/gtest.h>
 #include <path_searching/kinodynamic_astar.h>
+#include <algorithm>
 #include <limits>
 #include <map>
 #include <set>
@@ -96,8 +97,66 @@ TEST(Search, InvalidParametersAndStates) {
   c=config(); c.lower.z()=c.upper.z(); EXPECT_THROW(KinodynamicAstar k(c),std::invalid_argument);
   KinodynamicAstar k(config()); k.setKdtree(background());
   EXPECT_EQ(plan(k,{0,0,-1}),KinodynamicAstar::INVALID_INPUT);
-  EXPECT_EQ(plan(k,{0,0,1},{4,0,1},{0,0,3}),KinodynamicAstar::INVALID_INPUT);
+  EXPECT_EQ(plan(k,{0,0,1},{4,0,1},{0,0,std::numeric_limits<double>::infinity()}),KinodynamicAstar::INVALID_INPUT);
   EXPECT_THROW(k.sampleTrajectory(0),std::invalid_argument);
+}
+
+// A measured overspeed state stays exact while the first checked primitive brakes into the envelope.
+TEST(Search, OverspeedStartBrakesWithoutChangingInitialVelocity) {
+  SearchConfig c;
+  KinodynamicAstar planner(c); ASSERT_TRUE(planner.setKdtree(background()));
+  const Vector3d velocity(1.2,0.3,0.26);
+  ASSERT_EQ(planner.search({0,0,1},velocity,Vector3d::Zero(),{4,0,1},Vector3d::Zero(),false),
+            KinodynamicAstar::REACH_END);
+  const auto segments=planner.getSegments(); ASSERT_GT(segments.size(),1u);
+  const auto& first=segments.front();
+  EXPECT_LT((first.coefficients.col(1)-velocity).norm(),1e-12);
+  const Vector3d acceleration=2*first.coefficients.col(2);
+  EXPECT_LE(acceleration.head<2>().norm(),c.max_acc_xy+1e-9);
+  EXPECT_LE(std::abs(acceleration.z()),c.max_acc_z+1e-9);
+  const Vector3d recovered=velocity+acceleration*first.duration;
+  EXPECT_NEAR(recovered.head<2>().norm(),c.max_vel_xy,1e-9);
+  EXPECT_NEAR(recovered.z(),c.max_vel_z,1e-9);
+  for (const auto& sample:planner.sampleTrajectory(0.002)) {
+    const double factor=std::clamp(sample.time/first.duration,0.0,1.0);
+    const Vector3d envelope=velocity+(recovered-velocity)*factor;
+    EXPECT_LE(sample.velocity.head<2>().norm(),envelope.head<2>().norm()+1e-9);
+    EXPECT_LE(std::abs(sample.velocity.z()),std::max(std::abs(envelope.z()),c.max_vel_z)+1e-9);
+  }
+  // Tiny excess speed can brake without leaving the root spatial cell.
+  ASSERT_EQ(planner.search({0,0,1},{0,0,0.201},Vector3d::Zero(),{0.5,0,1},Vector3d::Zero(),true),
+            KinodynamicAstar::REACH_END);
+  EXPECT_DOUBLE_EQ(planner.getSegments().front().coefficients(2,1),0.201);
+}
+
+// Recovery cannot excuse crossing the height bound or an obstacle during the braking prefix.
+TEST(Search, OverspeedRecoveryRetainsHeightAndCollisionChecks) {
+  SearchConfig c; c.lower.z()=0.8; c.upper.z()=1.1;
+  KinodynamicAstar planner(c); ASSERT_TRUE(planner.setKdtree(background()));
+  EXPECT_EQ(planner.search({0,0,1.099},{0,0,0.3},Vector3d::Zero(),{0.5,0,1},Vector3d::Zero(),false),
+            KinodynamicAstar::NO_PATH);
+  EXPECT_TRUE(planner.getSegments().empty());
+  planner.clearMap();
+  pcl::PointCloud<pcl::PointXYZ> cloud; cloud.push_back({0.3,0,1});
+  ASSERT_TRUE(planner.setKdtree(cloud));
+  EXPECT_EQ(planner.search({0,0,1},{1.2,0,0},Vector3d::Zero(),{-0.5,0,1},Vector3d::Zero(),false),
+            KinodynamicAstar::NO_PATH);
+  EXPECT_TRUE(planner.getSegments().empty());
+}
+
+// A small vertical drift needs an exact stopping control rather than a large opposing lattice input.
+TEST(Search, NarrowVerticalLatticeStopsSmallDriftBeforeCruise) {
+  SearchConfig c; c.vertical_distance_weight=10;
+  KinodynamicAstar planner(c); ASSERT_TRUE(planner.setKdtree(background()));
+  for (double vz:{-0.02,0.02}) {
+    ASSERT_EQ(planner.search({0,0,1},{0,0,vz},Vector3d::Zero(),{4,0,1},Vector3d::Zero(),false),
+              KinodynamicAstar::REACH_END);
+    // One regular-duration stop travels |vz|*tau/2 vertically; cruising must not keep accumulating it.
+    const double stopping_travel=std::abs(vz)*c.max_tau/2;
+    for (const auto& sample:planner.sampleTrajectory(0.002))
+      EXPECT_LE(std::abs(sample.position.z()-1),stopping_travel+1e-9);
+    validate(planner,background(),{4,0,1});
+  }
 }
 
 // Compare two feasible detours under the deployed directional limits, without changing clearance.
@@ -109,11 +168,8 @@ TEST(Search, VerticalTravelCostPrefersHorizontalDetourAndRetainsVerticalEscape) 
   SearchConfig legacy;
   KinodynamicAstar original(legacy); ASSERT_TRUE(original.setKdtree(cloud));
   ASSERT_EQ(original.search({0,0,1},{0,0,0},{0,0,0},{4,0,1},{0,0,0},true),KinodynamicAstar::REACH_END);
-  double original_travel=0,previous=1;
-  for (const auto& s:original.sampleTrajectory(0.002)) {
-    original_travel+=std::abs(s.position.z()-previous); previous=s.position.z();
-  }
-  EXPECT_GT(original_travel,0.5);
+  // An unweighted search may also find a horizontal route; do not require a worse baseline.
+  validate(original,cloud,{4,0,1});
   auto preferred=legacy; preferred.vertical_distance_weight=10;
   KinodynamicAstar horizontal(preferred); ASSERT_TRUE(horizontal.setKdtree(cloud));
   ASSERT_EQ(horizontal.search({0,0,1},{0,0,0},{0,0,0},{4,0,1},{0,0,0},true),KinodynamicAstar::REACH_END);
@@ -356,8 +412,9 @@ TEST(Search, NativeDirectionalEnvelopeOnPrimitivesAndTerminalShot) {
     ASSERT_EQ(plan(k,{0,0,1},goal),KinodynamicAstar::REACH_END);
     validate(k,cloud,goal);
   }
-  EXPECT_EQ(plan(k,{0,0,1},{0.5,0.5,1.4},{0.8,0.8,0}),KinodynamicAstar::INVALID_INPUT);
-  EXPECT_EQ(plan(k,{0,0,1},{0.5,0.5,1.4},{0,0,0.21}),KinodynamicAstar::INVALID_INPUT);
+  // A measured start may brake into the envelope; requested terminal velocity must already fit it.
+  EXPECT_EQ(k.search({0,0,1},{0,0,0},{0,0,0},{0.5,0.5,1.4},{0.8,0.8,0},false),KinodynamicAstar::INVALID_INPUT);
+  EXPECT_EQ(k.search({0,0,1},{0,0,0},{0,0,0},{0.5,0.5,1.4},{0,0,0.21},false),KinodynamicAstar::INVALID_INPUT);
   EXPECT_EQ(k.search({0,0,1},{0,0,0},{1.5,1.5,0},{0.5,0.5,1.4},{0,0,0},true),
             KinodynamicAstar::INVALID_INPUT);
 }

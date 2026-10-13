@@ -18,7 +18,7 @@ path_planning:
     stamp_clock: receive  # ros: validate header age; receive: explicitly accept unknown sensor-clock offset
     # Native alternating KD-tree accumulation; no bridge snapshot profile.
     cloud.map_mode: dual_tree
-    odometry_twist_in_body: true  # nav_msgs/Odometry twist is expressed in child_frame_id
+    odometry_twist_in_body: true  # Generic/MAVROS body twist; Odin uses its entry-specific setting below.
     # Metres, >=0: remove points strictly inside this 3D radius before map accumulation; 0 disables.
     # This is a sensor blind zone, not body classification: real obstacles inside it are also removed.
     cloud.blind_radius: 0.0
@@ -41,10 +41,10 @@ path_planning:
     output.build_budget: 0.1
 
     # Seconds, >0: regular acceleration-primitive duration; larger steps change search reach/granularity.
-    # Narrow speed-limited axes retain five controls sampled from the feasible acceleration interval.
+    # Narrow axes retain five feasible controls; Z also includes distinct bounded exact-stop input.
     search.max_tau: 0.6
     # Seconds, >0: maximum initial fixed-acceleration primitive duration (20 candidate durations).
-    # Standalone tries init=true first; explicit motion-service PLAN retains init=false.
+    # Used only by explicit core init=true and legacy execution-index replans; measured-state plans use init=false.
     search.init_max_tau: 0.8
     # Legacy scalar caps, m/s and m/s² per axis; directional limits below also apply.
     search.max_vel: 1.0
@@ -91,9 +91,11 @@ path_planning:
     search.lower: [-50.0, -50.0, -2.0]
     search.upper: [50.0, 50.0, 10.0]
 
-# Topic defaults consumed by the independent launch files, not by the planner node.
+# Entry-specific defaults consumed by the independent launch files.
 odin_launch:
   ros__parameters:
+    # SDK linear twist is in the world frame; override here for a different Odin publisher, or via CLI.
+    odometry_twist_in_body: false
     cloud: /odin1/cloud_slam_down
     odom: /odin1/odometry
     goal: /goal

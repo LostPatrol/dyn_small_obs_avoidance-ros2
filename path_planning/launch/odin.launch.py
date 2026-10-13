@@ -17,11 +17,14 @@ def _launch_node(context):
     parameters = helper['node_parameters'](
         data, ('/**', 'path_planning', '/path_planning'), {'planning_frame': 'odom', 'stamp_clock': 'receive',
          'search.lower': [-50.0, -50.0, -2.0]})
-    parameters = helper['planner_overrides'](context, parameters)
     topics = helper['node_parameters'](data, ('odin_launch',), {
         'cloud': '/odin1/cloud_slam_down', 'odom': '/odin1/odometry',
         'goal': '/goal', 'time_index': '/demo_node/trajectory_time_index',
+        'odometry_twist_in_body': False,
     })
+    # Odin's world twist default belongs to this entry point; its YAML and explicit CLI can override it.
+    parameters['odometry_twist_in_body'] = topics.pop('odometry_twist_in_body')
+    parameters = helper['planner_overrides'](context, parameters)
     return [Node(package='path_planning', executable='path_planning_node', name='path_planning',
                  output='screen', parameters=[parameters],
                  remappings=[(name, helper['launch_value'](context, name, value))
@@ -34,6 +37,6 @@ def generate_launch_description():
     arguments = [DeclareLaunchArgument('config', default_value=config)]
     arguments.extend(DeclareLaunchArgument(name, default_value='') for name in (
         'cloud', 'odom', 'goal', 'time_index', 'blind_radius', 'map_mode',
-        'planning_frame', 'stamp_clock', 'search_lower',
+        'planning_frame', 'stamp_clock', 'search_lower', 'odometry_twist_in_body',
     ))
     return LaunchDescription([*arguments, OpaqueFunction(function=_launch_node)])

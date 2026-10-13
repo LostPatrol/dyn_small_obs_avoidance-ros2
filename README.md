@@ -90,8 +90,11 @@ The same heartbeat exposes a live session while a valid near-goal curve suppress
 If an input failure revokes that curve, recovery schedules one plan from the actual state.
 
 Default avoidance horizontal speed/acceleration **norms** are 1.0 m/s and 2.0 m/s²; vertical absolute
-limits are 0.2 m/s and 2.0 m/s². Ordinary primitives and terminal cubic shots satisfy these
-limits in their original time. Set `search.max_vel_xy`, `search.max_vel_z`, `search.max_acc_xy`,
+limits are 0.2 m/s and 2.0 m/s². A measured overspeed start keeps its exact initial velocity and
+first brakes into the envelope within the acceleration, clearance and position bounds; speed
+can exceed the nominal limit during this monotonically decelerating prefix. An infeasible braking
+prefix fails. All subsequent primitives and terminal cubic shots satisfy nominal limits in their
+original time. Set `search.max_vel_xy`, `search.max_vel_z`, `search.max_acc_xy`,
 and `search.max_acc_z` in YAML or as launch arguments. Legacy scalar `search.max_vel` and
 `search.max_acc` CLI arguments fill both directions unless a more specific directional CLI
 argument is also supplied. Thus explicit CLI values override YAML, and directional CLI values
@@ -106,7 +109,14 @@ The original acceleration scalar was 2.0 m/s² **per axis**; the new horizontal 
 The ordinary primitive duration `search.max_tau` is 0.6 s. When even a half-acceleration axis
 candidate exceeds its speed cap from rest, its five controls sample the feasible positive and
 negative acceleration intervals using current velocity and duration. Other axes retain the
-original lattice. This preserves nonzero Z candidates without trajectory retiming.
+original lattice. The narrow Z axis also includes exact stopping acceleration `-vz/max_tau` when
+it is bounded and distinct, retaining all original 125 controls and using at most 150 candidates.
+This avoids carrying small vertical drift through the whole cruise without trajectory retiming.
+Measured-state replans select acceleration immediately, without a forced initial coast that
+could repeatedly postpone steering. The optional legacy execution-index mode retains its initial coast.
+`odin.launch.py` defaults to the SDK's world-frame linear velocity; generic/MAVROS inputs retain body twist.
+Override the Odin convention in `odin_launch.ros__parameters.odometry_twist_in_body` in YAML;
+an explicit `odometry_twist_in_body:=true/false` launch argument takes precedence.
 
 The shared YAML enables `search.vertical_distance_weight: 10.0`: each metre of accumulated
 up/down travel adds 10 cost units, favouring horizontal detours when other costs are similar.
@@ -114,6 +124,9 @@ Primitives and terminal cubic candidates include this cost. The added height-dif
 heuristic is temporarily disabled because it caused repeated vertical reversals.
 Set it to `0.0` for legacy behavior (also the bare C++/node default); restart after changing it.
 This is a soft preference, not a height constraint or a fix for incorrect state coordinates.
+Search uses `lambda_heu=5` and a single `1.0001` tie factor (effective heuristic multiplier
+`5.0005`). The half-speed duration estimate and position-only hash do not guarantee an
+admissible heuristic or an optimal path.
 
 ## 5. Documentation
 

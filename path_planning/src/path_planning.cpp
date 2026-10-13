@@ -281,6 +281,33 @@ class Planner : public rclcpp::Node {
     result.max_acceleration_xy=std::min(config.max_acc,config.max_acc_xy);
     result.max_acceleration_z=std::min(config.max_acc,config.max_acc_z);
   }
+  /// Explain native search failures without hiding boundary-state and collision causes.
+  std::string searchDetail(int status,const Vector& start,const Vector& velocity,const Vector& goal) {
+    const auto& c=core_->config();
+    if (status==Result::REACH_END) return "goal reached by trajectory";
+    if (status==Result::REACH_HORIZON) return "partial horizon; endpoint is not goal";
+    if (status==Result::INVALID_INPUT) {
+      if (!start.allFinite() || !velocity.allFinite() || !goal.allFinite()) return "nonfinite search boundary state";
+      const auto bounds_detail=[&](const char* label,const Vector& point) {
+        return std::string(label)+" outside search bounds: position=["+
+            std::to_string(point.x())+","+std::to_string(point.y())+","+std::to_string(point.z())+
+            "], lower=["+std::to_string(c.lower.x())+","+std::to_string(c.lower.y())+","+std::to_string(c.lower.z())+
+            "], upper=["+std::to_string(c.upper.x())+","+std::to_string(c.upper.y())+","+std::to_string(c.upper.z())+"]";
+      };
+      if (!core_->inBounds(start)) return bounds_detail("start",start);
+      if (!core_->inBounds(goal)) return bounds_detail("goal",goal);
+      return "invalid search boundary state or unrepresentable braking duration";
+    }
+    if (status==Result::NO_MAP) return "obstacle map unavailable";
+    if (status==Result::TIMEOUT) return "search time budget exhausted";
+    if (status==Result::NODE_LIMIT) return "search node capacity exhausted";
+    if (!core_->isSafe(start.x(),start.y(),start.z())) return "start violates obstacle clearance";
+    if (!core_->isSafe(goal.x(),goal.y(),goal.z())) return "goal violates obstacle clearance";
+    if (velocity.head<2>().norm()>c.max_vel_xy || std::abs(velocity.z())>c.max_vel_z ||
+        velocity.cwiseAbs().maxCoeff()>c.max_vel)
+      return "no feasible trajectory from overspeed start: bounded braking or continuation blocked";
+    return "no feasible trajectory: search frontier exhausted";
+  }
   /// Publish only process identity when idle/near-goal; this never searches or changes curve validity.
   void identityHeartbeat() {
     const auto current=Clock::now();
@@ -361,6 +388,7 @@ class Planner : public rclcpp::Node {
   // Actual vector length guards the upstream N+1/index accesses that otherwise read out of bounds.
   void plan(bool refresh=false) {
     Vector start=position_,velocity=velocity_;
+    bool from_cached_path=false;
     if (!refresh && !first_plan_ && replan_index_!=-1) {
       if (std::abs(static_cast<long double>(last_replan_index_)-replan_index_)<10) return;
       const auto n=static_cast<int64_t>(standalone_path_.size());
@@ -377,18 +405,21 @@ class Planner : public rclcpp::Node {
       } else {
         velocity=(standalone_path_[used+2]-standalone_path_[used-2])/0.04;
       }
+      from_cached_path=true;
     }
     // Measure from each actual attempt, including failed searches, rather than timer callbacks.
     curve_recovery_pending_=false;
     last_replan_time_=Clock::now(); last_replan_position_=position_;
-    const auto result=executePlan(start,velocity,goal_,false);
+    const auto result=executePlan(start,velocity,goal_,false,from_cached_path);
     if (result.status==Result::REACH_END || result.status==Result::REACH_HORIZON) {
       // ROS1's execution-index/check buffer is sampled at 0.01 s; public output keeps sample_step.
       standalone_path_=core_->getKinoTraj(0.01);
       first_plan_=false; replan_flag_=false;
     }
   }
-  Result executePlan(const Vector& start,const Vector& velocity,const Vector& goal,bool requested) {
+  /// Plan from measured state immediately; only the legacy execution-index mode preserves a coast.
+  Result executePlan(const Vector& start,const Vector& velocity,const Vector& goal,bool requested,
+                     bool preserve_initial_acceleration=false) {
     processPendingCloud();
     // Readiness flags are internal: zero means valid input, not a published PlanResult status.
     // The first failing gate determines the reported reason; this is not an aggregate diagnostic.
@@ -405,14 +436,12 @@ class Planner : public rclcpp::Node {
       if (!fresh(cloud_received_,cloud_stamp_)) invalidateCloud(Result::STALE_INPUT,"cloud expired; map reset");
     } else {
       const auto began=Clock::now();
-      // Standalone matches ROS1: fixed zero initial acceleration, retry NO_PATH with free acceleration.
-      // Explicit motion-service requests retain the deployed unrestricted search behavior.
-      result.status=core_->search(start,velocity,Vector::Zero(),goal,Vector::Zero(),!requested);
-      if (!requested && result.status==Result::NO_PATH)
+      // Repeated measured-state replans must not keep postponing control behind a zero-acceleration coast.
+      result.status=core_->search(start,velocity,Vector::Zero(),goal,Vector::Zero(),preserve_initial_acceleration);
+      if (preserve_initial_acceleration && result.status==Result::NO_PATH)
         result.status=core_->search(start,velocity,Vector::Zero(),goal,Vector::Zero(),false);
       result.planning_ms=std::chrono::duration<double,std::milli>(Clock::now()-began).count();
-      result.detail=result.status==Result::REACH_END?"goal reached by trajectory":
-          result.status==Result::REACH_HORIZON?"partial horizon; endpoint is not goal":"search failed";
+      result.detail=searchDetail(result.status,start,velocity,goal);
       // Processing must not extend the input freshness contract.
       if (!fresh(cloud_received_,cloud_stamp_) || (!requested && !fresh(odom_received_,odom_stamp_))) {
         result.status=Result::STALE_INPUT; result.detail="input expired during search";

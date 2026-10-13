@@ -161,9 +161,9 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
   if (!start_pt.allFinite() || !start_v.allFinite() || !start_a.allFinite() ||
       !end_pt.allFinite() || !end_v.allFinite() || !std::isfinite(time_start) ||
       !inBounds(start_pt) || !inBounds(end_pt) ||
-      start_v.cwiseAbs().maxCoeff()>max_vel_ || end_v.cwiseAbs().maxCoeff()>max_vel_ ||
+      end_v.cwiseAbs().maxCoeff()>max_vel_ ||
       start_a.cwiseAbs().maxCoeff()>max_acc_ ||
-      !withinVelocity(start_v) || !withinVelocity(end_v) || !withinAcceleration(start_a)) return INVALID_INPUT;
+      !withinVelocity(end_v) || !withinAcceleration(start_a)) return INVALID_INPUT;
   if (!map_ready_) return NO_MAP;
   if (!isSafe(start_pt.x(), start_pt.y(), start_pt.z()) ||
       !isSafe(end_pt.x(), end_pt.y(), end_pt.z())) return NO_PATH;
@@ -233,7 +233,9 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
     }
     if (best_terminal && entry.score >= best_cost) return finish(REACH_END);
     bool reach_horizon = (cur_node->state.head(3) - start_pt).norm() >= horizon_;
-    bool near_end = abs(cur_node->index(0) - end_index(0)) <= tolerance &&
+    // An overspeed measured root must brake before a nominal-envelope terminal shot.
+    bool near_end = withinVelocity(cur_node->state.tail(3)) &&
+                    abs(cur_node->index(0) - end_index(0)) <= tolerance &&
                     abs(cur_node->index(1) - end_index(1)) <= tolerance &&
                     abs(cur_node->index(2) - end_index(2)) <= tolerance;
 
@@ -298,12 +300,29 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
     double pro_t;
     vector<Eigen::Vector3d> inputs;
     vector<double> durations;
-    inputs.reserve(init_search ? 1 : 125);
+    inputs.reserve(init_search ? 1 : 150);
     durations.reserve(init_search ? kInitialDurationCount : 1);
     // Initial mode preserves supplied acceleration only for this first expansion.
-    // Preserve five samples per axis, with directional acceleration bounds.
-    const bool initial_expansion=init_search;
-    if (init_search)
+    // Preserve five samples per axis; a narrow Z axis may also need exact stopping input.
+    const bool recovering_root=cur_node->parent==nullptr && !withinVelocity(cur_state.tail(3));
+    const bool initial_expansion=init_search || recovering_root;
+    if (recovering_root)
+    {
+      // Keep the measured velocity. A bounded first primitive monotonically brakes each
+      // overspeed component to the nominal envelope; all later segments use normal limits.
+      Eigen::Vector3d recovered=cur_state.tail(3).cwiseMax(-max_vel_).cwiseMin(max_vel_);
+      if (recovered.head<2>().norm()>config_.max_vel_xy)
+        recovered.head<2>()*=config_.max_vel_xy/recovered.head<2>().norm();
+      recovered.z()=std::clamp(recovered.z(),-config_.max_vel_z,config_.max_vel_z);
+      const Eigen::Vector3d change=recovered-cur_state.tail(3);
+      const double duration=std::max({change.head<2>().norm()/config_.max_acc_xy,
+          std::abs(change.z())/config_.max_acc_z,change.cwiseAbs().maxCoeff()/max_acc_});
+      if (!std::isfinite(duration) || duration<=0) return finish(INVALID_INPUT);
+      inputs.push_back(change/duration);
+      durations.push_back(duration);
+      init_search=false;
+    }
+    else if (init_search)
     {
       inputs.push_back(start_acc_);
       for (int i = 1; i <= kInitialDurationCount; ++i)
@@ -312,7 +331,8 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
     }
     else
     {
-      std::array<std::array<double, 5>, 3> axes;
+      std::array<std::array<double, 6>, 3> axes;
+      std::array<std::size_t, 3> counts{5,5,5};
       for (int axis=0; axis<3; ++axis) {
         const double acceleration=std::min(max_acc_,axis==2?config_.max_acc_z:config_.max_acc_xy);
         const double velocity=std::min(max_vel_,axis==2?config_.max_vel_z:config_.max_vel_xy);
@@ -323,12 +343,20 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
         const double negative=std::min(acceleration,std::max(0.0,(velocity+cur_state(axis+3))/max_tau_));
         const double positive=std::min(acceleration,std::max(0.0,(velocity-cur_state(axis+3))/max_tau_));
         axes[axis]={-negative,-negative/2,0,positive/2,positive};
+        // Small vertical drift cannot stop exactly on the five signed acceleration samples.
+        // Retain those controls and add the bounded zero-terminal-velocity candidate only for Z.
+        const double stop=-cur_state(axis+3)/max_tau_;
+        if (axis==2 && std::abs(stop)<=acceleration &&
+            std::none_of(axes[axis].begin(),axes[axis].begin()+counts[axis],
+                [&](double value) { return std::abs(value-stop)<kAccelerationZeroTolerance; })) {
+          axes[axis][counts[axis]++]=stop;
+        }
       }
-      for (double ax : axes[0])
-        for (double ay : axes[1])
-          for (double az : axes[2])
+      for (std::size_t ix=0; ix<counts[0]; ++ix)
+        for (std::size_t iy=0; iy<counts[1]; ++iy)
+          for (std::size_t iz=0; iz<counts[2]; ++iz)
           {
-            um << ax, ay, az;
+            um << axes[0][ix], axes[1][iy], axes[2][iz];
             inputs.push_back(um);
           }
       durations.push_back(max_tau_);
@@ -366,9 +394,8 @@ int KinodynamicAstar::search(Eigen::Vector3d start_pt, Eigen::Vector3d start_v, 
         Eigen::Vector3i pro_id = posToIndex(pro_pos);
 
         int pro_t_id = dynamic ? timeToIndex(pro_t) : 0;
-        // A short initial coast may stay in the root cell while being a valid prefix before
-        // free acceleration. Keep these first-step candidates outside the spatial hash: merging
-        // them with the closed root forces long coasts that rolling replans can endlessly defer.
+        // Short coasts or bounded recovery may stay in the root cell before free acceleration.
+        // Keep these first-step candidates outside the hash instead of merging with the closed root.
         const bool initial_same_cell=initial_expansion && !dynamic && pro_id==cur_node->index;
         PathNodePtr pro_node = initial_same_cell ? nullptr :
             (dynamic ? expanded_nodes_.find(pro_id, pro_t_id) : expanded_nodes_.find(pro_id));
@@ -494,8 +521,8 @@ void KinodynamicAstar::retrievePath(PathNodePtr end_node)
   reverse(path_nodes_.begin(), path_nodes_.end());
 }
 
-// Minimize the unconstrained cubic connection cost over candidate positive durations.
-// The estimated time ignores obstacles and derivative limits; computeShotTraj must validate it.
+// Estimate cubic connection cost using directional speed-based candidate durations.
+// The half-speed time floor is not an admissible bound; computeShotTraj validates feasibility.
 double KinodynamicAstar::estimateHeuristic(Eigen::VectorXd x1, Eigen::VectorXd x2, double& optimal_time)
 {
   const Vector3d dp = x2.head(3) - x1.head(3);
@@ -532,7 +559,7 @@ double KinodynamicAstar::estimateHeuristic(Eigen::VectorXd x1, Eigen::VectorXd x
 
   optimal_time = t_d;
 
-  double heuristic = (1 + tie_breaker_) * cost;
+  double heuristic = tie_breaker_ * cost;
   // Temporarily disabled: weighted endpoint-height attraction caused repeated vertical reversals.
   // heuristic += config_.vertical_distance_weight * std::abs(dp.z());
   return heuristic;

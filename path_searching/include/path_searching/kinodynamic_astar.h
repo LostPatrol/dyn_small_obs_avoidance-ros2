@@ -138,6 +138,7 @@ class KinodynamicAstar {
   /**
    * Search from position/velocity to goal/goal_velocity; replaces the previous search result.
    * init=true constrains the first expansion to acceleration; false uses the acceleration lattice.
+   * An overspeed measured start first brakes into the envelope without changing its initial velocity.
    * acceleration must be finite and within limits even when init=false.
    * dynamic=true adds time bins to the hash using time_start (s) as origin; collision queries
    * remain spatial and do NOT predict moving obstacles. The ROS wrapper uses dynamic=false.
@@ -183,8 +184,7 @@ class KinodynamicAstar {
   double t_shot_ = 0.0;
   double max_tau_, init_max_tau_, max_vel_, max_acc_, w_time_, horizon_, lambda_heu_;
   int allocate_num_;
-  // Preserve upstream scoring: estimateHeuristic multiplies by (1 + tie_breaker_),
-  // so the effective factor is 2.0001, not just a 0.01% perturbation.
+  // Multiplicative 0.01% tie perturbation; the factor already includes one.
   double tie_breaker_ = 1.0 + 1.0 / 10000.0;
   double resolution_, inv_resolution_, time_resolution_, inv_time_resolution_;
   Eigen::Vector3d origin_;
