@@ -19,7 +19,7 @@
 
 - KT_HORIZON对应search.tree_period，当前YAML及C++默认均为20；已同步drone-refresh(.186)及drone-new(.169)源码和Release安装目录，下次启动生效。
 - Task5代码基线`333dfbe`（含`ca769f0`）已在开发机、refresh和hp-desktop原生Release部署，主工程控制代码`a76a069`同步重建；new仍待同步原生接入、接口消费者及本次修复。refresh现场权重30、Z[.6,1.4]保留，lambda1已运行回读；静态观察未解锁、零setpoint，结束后所有本次机载/避障节点停止。两端控制26/26、core28/28，开发机最终wrapper35/35通过。
-- 最终固定bag输入107/107成功，refresh ARM64搜索中位43.994ms、max176.898ms；未叠加全传感器长期负载。最终两次自主SITL均26/26规划成功、完成任务，但表面净空.29570/.29367m仍未过>.35m，不能称完整实飞验收。详细分析/执行报告保存在主工程agent/report本地目录。
+- 最终对原bag的107条成功计划固定输入子集107/107成功（不含原69条失败），refresh ARM64搜索中位43.994ms、max176.898ms；未叠加全传感器长期负载。最终两次自主SITL均26/26规划成功、完成任务，但表面净空.29570/.29367m仍未过>.35m，不能称完整实飞验收。详细分析/执行报告保存在主工程agent/report本地目录。
 - 本次更新前的HEAD、现场差异和install分别备份于refresh `/home/nvidia/ros2-ardupilot-maintenance/task5-avoidance-20261013/`、hp `/home/scq/backups/task5-avoidance-20261013/`；refresh命名stash只保存旧现场YAML。不要恢复整份旧YAML覆盖新默认或复制ARM/x86安装产物。
 
 - drone-new=.169，drone-refresh=.186；两机项目路径均/home/nvidia/dyn_small_obs_avoidance-ros2。净空证书代码24e518f已同步两机，均完成Release安装、核心/DDS测试及固定现场点云节点回放，安装核心库SHA256一致。186曾出现源码空文件及损坏构建缓存，已恢复；同步时须核实实际源码与安装库，不能仅看Git HEAD。持续传感器CPU量化复测未记录。
