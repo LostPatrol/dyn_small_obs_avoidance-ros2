@@ -30,7 +30,7 @@ source /opt/ros/jazzy/setup.bash
 # 新环境只用系统 Python 自举；之后显式使用仓库自己的环境。
 /usr/bin/python3 -m venv --system-site-packages .venv
 rosdep install --from-paths path_searching path_planning --ignore-src -r -y --rosdistro jazzy
-CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --executor sequential \
+CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --base-paths path_searching path_planning --executor sequential \
   --cmake-args -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$PWD/.venv/bin/python"
 source install/setup.bash
 colcon test

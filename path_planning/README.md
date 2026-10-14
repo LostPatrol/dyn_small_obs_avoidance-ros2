@@ -74,7 +74,7 @@ Odin入口默认可由YAML的`odin_launch.ros__parameters.odometry_twist_in_body
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-colcon build --packages-up-to path_planning --cmake-args -DCMAKE_BUILD_TYPE=Release
+colcon build --base-paths path_searching path_planning --packages-up-to path_planning --cmake-args -DCMAKE_BUILD_TYPE=Release
 source install/setup.bash
 ctest --test-dir build/path_planning -R test_motion_adapter --output-on-failure
 .venv/bin/python -m pytest path_planning/test/test_motion_service.py -q

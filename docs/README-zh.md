@@ -34,7 +34,7 @@ cd dyn_small_obs_avoidance-ros2
 source /opt/ros/jazzy/setup.bash
 /usr/bin/python3 -m venv --system-site-packages .venv
 rosdep install --from-paths path_searching path_planning --ignore-src -r -y --rosdistro jazzy
-CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --executor sequential \
+CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --base-paths path_searching path_planning --executor sequential \
   --cmake-args -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$PWD/.venv/bin/python"
 source install/setup.bash
 ```
