@@ -1,14 +1,19 @@
 <!-- Concise English project homepage; detailed operating instructions are in docs/USAGE.md. -->
-# dyn_small_obs_avoidance-ros2
+# dyn_small_obs_avoidance-ros2-modified
 
 ### Kinodynamic obstacle avoidance for ROS 2 Jazzy
 
 [中文说明](docs/README-zh.md)
 
-A standalone ROS 2 port of [HKU-MARS dyn_small_obs_avoidance](https://github.com/hku-mars/dyn_small_obs_avoidance),
+A standalone modified ROS 2 port of [HKU-MARS dyn_small_obs_avoidance](https://github.com/hku-mars/dyn_small_obs_avoidance),
 containing the `path_searching` and `path_planning` modules. It combines time-accumulated
 KD-Tree mapping, kinodynamic A* search and a cubic terminal connection to plan trajectories
 from registered point clouds and odometry.
+
+The root packages are the maintained modified version, with algorithm fixes and changes.
+[upstream-ros2-port](upstream-ros2-port/dyn_small_obs_avoidance-main/README.md) is a locally
+prepared ROS 2 interface adaptation for comparison, not an official upstream ROS 2 release.
+It retains known original issues and should be built separately from the root packages.
 
 The planner publishes polynomial trajectories, sampled position/velocity/acceleration and a
 path for visualization. It runs independently of SLAM, sensor drivers and flight controllers.
@@ -29,8 +34,8 @@ See the [usage guide](docs/USAGE.md) for dependency installation and environment
 With ROS 2 and rosdep initialized:
 
 ```bash
-git clone https://github.com/LostPatrol/dyn_small_obs_avoidance-ros2.git
-cd dyn_small_obs_avoidance-ros2
+git clone https://github.com/LostPatrol/dyn_small_obs_avoidance-ros2-modified.git
+cd dyn_small_obs_avoidance-ros2-modified
 source /opt/ros/jazzy/setup.bash
 /usr/bin/python3 -m venv --system-site-packages .venv
 rosdep install --from-paths path_searching path_planning --ignore-src -r -y --rosdistro jazzy

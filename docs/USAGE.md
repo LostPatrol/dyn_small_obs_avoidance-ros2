@@ -24,8 +24,8 @@ sudo apt install build-essential cmake python3-colcon-common-extensions python3-
   python3-venv python3-pytest libeigen3-dev libpcl-dev \
   ros-jazzy-pcl-conversions ros-jazzy-rosidl-default-generators \
   ros-jazzy-ament-cmake-gtest ros-jazzy-ament-cmake-pytest ros-jazzy-sensor-msgs-py
-git clone https://github.com/LostPatrol/dyn_small_obs_avoidance-ros2.git
-cd dyn_small_obs_avoidance-ros2
+git clone https://github.com/LostPatrol/dyn_small_obs_avoidance-ros2-modified.git
+cd dyn_small_obs_avoidance-ros2-modified
 source /opt/ros/jazzy/setup.bash
 # 新环境只用系统 Python 自举；之后显式使用仓库自己的环境。
 /usr/bin/python3 -m venv --system-site-packages .venv

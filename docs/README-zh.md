@@ -1,14 +1,19 @@
 <!-- 与英文主页对应的简明中文介绍；详细操作与接口见USAGE.md。 -->
-# dyn_small_obs_avoidance-ros2
+# dyn_small_obs_avoidance-ros2-modified
 
 ### 面向 ROS 2 Jazzy 的运动学避障规划
 
 [English](../README.md)
 
 [HKU-MARS dyn_small_obs_avoidance](https://github.com/hku-mars/dyn_small_obs_avoidance)
-的独立 ROS 2 移植，包含 `path_searching` 和 `path_planning` 两个模块。
+的独立 ROS 2 修改版，包含 `path_searching` 和 `path_planning` 两个模块。
 基于时间累积 KD-Tree 地图、运动学 A* 搜索和三次多项式终端连接，
 从已配准点云和里程计生成轨迹。
+
+根目录为持续维护的修改版，包含算法修复与行为调整。
+[`upstream-ros2-port`](../upstream-ros2-port/dyn_small_obs_avoidance-main/README.md)
+是本地制作的 ROS 2 接口适配参考，并非上游官方 ROS 2 版本；
+它保留已知原始问题，两版应分别构建。
 
 规划器发布多项式轨迹、位置/速度/加速度采样和可视化路径，
 独立于 SLAM、传感器驱动和飞控运行。
@@ -29,8 +34,8 @@
 安装 ROS 2 并初始化 rosdep 后，在终端运行：
 
 ```bash
-git clone https://github.com/LostPatrol/dyn_small_obs_avoidance-ros2.git
-cd dyn_small_obs_avoidance-ros2
+git clone https://github.com/LostPatrol/dyn_small_obs_avoidance-ros2-modified.git
+cd dyn_small_obs_avoidance-ros2-modified
 source /opt/ros/jazzy/setup.bash
 /usr/bin/python3 -m venv --system-site-packages .venv
 rosdep install --from-paths path_searching path_planning --ignore-src -r -y --rosdistro jazzy
