@@ -70,7 +70,7 @@ ros2 topic pub --once /goal geometry_msgs/msg/PoseStamped \
   '{header: {frame_id: camera_init}, pose: {position: {x: 4.0, y: 0.0, z: 1.0}, orientation: {w: 1.0}}}'
 ```
 
-默认规划坐标系为 `camera_init`。按实际输入调整
+默认规划坐标系为 `odom`。按实际输入调整
 [planner.yaml](../path_planning/config/planner.yaml) 中的坐标系和规划边界，
 通过 `config:=/absolute/path/planner.yaml` 加载配置副本。
 规划结果发布到 `/plan_result` 和 `/kino_path`。
@@ -80,6 +80,7 @@ ROS2 bag 回放、输入约定和参数说明见[使用指南](USAGE.md)。
 ## 5. 配套文档
 
 - [详细使用、可视化与回放指南](USAGE.md)
+- [参数实际影响和重规划触发](planner_parameters.md)
 - [移植与修复说明](PORTING.md)
 - [验证结果和限制](VALIDATION.md)
 

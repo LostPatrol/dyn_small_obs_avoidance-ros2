@@ -31,7 +31,7 @@ constexpr uint32_t kFloat32Bytes = 4;  // PointField::FLOAT32 wire width, indepe
 constexpr uint32_t kXyzFieldCount = 3;  // Required scalar x/y/z; other fields may coexist.
 constexpr size_t kBlindPoseHistorySize = 256;  // Bounded history (~0.64 s at 400 Hz).
 constexpr int kMaxOutputSamples = 1000000;  // Matches the core's absolute sampling allocation cap.
-constexpr double kIdentityHeartbeatSeconds = 1.0;  // Session visibility without a target/search.
+constexpr double kIdentityHeartbeatSeconds = 1.0;  // Session visibility independent of target/search frequency.
 constexpr double kNearGoalDistanceMeters = 0.3;  // Suppress replans only while a successful curve remains valid.
 constexpr double kMaxOutputDuration = 3600.0;  // Seconds; avoids unbounded/ROS-duration-sized outputs.
 }  // namespace
@@ -88,10 +88,11 @@ class Planner : public rclcpp::Node {
     if (!std::isfinite(blind_radius_) || blind_radius_<0 || !positive(blind_pose_tolerance_) ||
         !positive(blind_wait_) || blind_wait_>timeout_ ||
         !blind_offset_.allFinite()) throw std::invalid_argument("invalid blind filter parameters");
+    // Positive infinity disables a forced refresh without disabling event replans or identity.
     if (frame_.empty() || !positive(rate_) || rate_>kMaxPlanningRateHz || !positive(timeout_) || !positive(step_) ||
         max_samples_<1 || max_samples_>kMaxOutputSamples || !positive(max_duration_) ||
         max_duration_>kMaxOutputDuration || !positive(build_budget_) ||
-        !positive(replan_interval_) || !positive(replan_distance_) ||
+        !(replan_interval_>0) || !(replan_distance_>0) ||
         (stamp_clock_!="ros" && stamp_clock_!="receive")) throw std::invalid_argument("invalid wrapper parameters");
     // Best-effort subscribers match either sensor reliability policy. Results/goals are reliable
     // and volatile: a newly connected consumer must wait for a fresh result rather than a latched path.
@@ -123,7 +124,8 @@ class Planner : public rclcpp::Node {
           !fresh(odom_received_,odom_stamp_)) executePlan(position_,velocity_,goal_,false);
       else {
         replan(false);
-        if (successful_curve_valid_ && (goal_-position_).norm()<kNearGoalDistanceMeters) identityHeartbeat();
+        // A healthy active goal must remain visible while it waits for an event or refresh.
+        identityHeartbeat();
       }
     });
     RCLCPP_INFO(get_logger(),"Planner ready: frame=%s, replan_interval=%.3fs, replan_distance=%.3fm, clock=%s",

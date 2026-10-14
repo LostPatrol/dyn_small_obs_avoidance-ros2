@@ -34,7 +34,7 @@ cd dyn_small_obs_avoidance-ros2
 source /opt/ros/jazzy/setup.bash
 /usr/bin/python3 -m venv --system-site-packages .venv
 rosdep install --from-paths path_searching path_planning --ignore-src -r -y --rosdistro jazzy
-CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --executor sequential \
+CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --base-paths path_searching path_planning --executor sequential \
   --cmake-args -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$PWD/.venv/bin/python"
 source install/setup.bash
 ```
@@ -86,11 +86,13 @@ cancel ID must match the active target. Each manual `/goal` message gets a gener
 Native `PlanResult` includes `planner_session`, `target_id`, `sequence`, and `goal_revision`.
 `PlanMotion/CHECK_LINE` remains available for current-map line inspection and does not replace
 the active target. Idle nodes do not search; a 1 Hz identity-only heartbeat has an empty target ID and no trajectory.
-The same heartbeat exposes a live session while a valid near-goal curve suppresses replanning.
+The same heartbeat keeps an active session visible while it waits for a replan, at any distance.
+Set `replan_interval` or `replan_distance` to `.inf` to disable that forced trigger;
+goal and blocked-path events remain active.
 If an input failure revokes that curve, recovery schedules one plan from the actual state.
 
-Default avoidance horizontal speed/acceleration **norms** are 1.0 m/s and 2.0 m/s²; vertical absolute
-limits are 0.2 m/s and 2.0 m/s². A measured overspeed start keeps its exact initial velocity and
+The shared YAML's selected comparison profile sets horizontal speed/acceleration **norms** to
+2.0 m/s and 2.0 m/s², with the same vertical absolute limits. A measured overspeed start keeps its exact initial velocity and
 first brakes into the envelope within the acceleration, clearance and position bounds; speed
 can exceed the nominal limit during this monotonically decelerating prefix. An infeasible braking
 prefix fails. All subsequent primitives and terminal cubic shots satisfy nominal limits in their
@@ -118,20 +120,22 @@ could repeatedly postpone steering. The optional legacy execution-index mode ret
 Override the Odin convention in `odin_launch.ros__parameters.odometry_twist_in_body` in YAML;
 an explicit `odometry_twist_in_body:=true/false` launch argument takes precedence.
 
-The shared YAML enables `search.vertical_distance_weight: 10.0`: each metre of accumulated
-up/down travel adds 10 cost units, favouring horizontal detours when other costs are similar.
+The shared YAML sets `search.vertical_distance_weight: 0.0` for the selected original-value profile.
+A positive weight adds cost per metre of accumulated up/down travel, favouring horizontal detours when other costs are similar.
 Primitives and terminal cubic candidates include this cost. The added height-difference
 heuristic is temporarily disabled because it caused repeated vertical reversals.
 Set it to `0.0` for legacy behavior (also the bare C++/node default); restart after changing it.
 This is a soft preference, not a height constraint or a fix for incorrect state coordinates.
-Search defaults to `lambda_heu=1` to reduce greedy detours, with a single `1.0001` tie factor
-(effective heuristic multiplier `1.0001`). Explicit YAML and CLI values still override the default.
+The shared YAML uses `lambda_heu=5`, with a single `1.0001` tie factor
+(effective heuristic multiplier `5.0005`); the bare C++/node default remains 1.
+Explicit YAML and CLI values override these defaults.
 The half-speed duration estimate and position-only hash do not guarantee an
 admissible heuristic or an optimal path.
 
 ## 5. Documentation
 
 - [Detailed usage, visualization and replay guide (Chinese)](docs/USAGE.md)
+- [Parameter effects and replanning triggers (Chinese)](docs/planner_parameters.md)
 - [Porting notes (Chinese)](docs/PORTING.md)
 - [Validation results and limitations (Chinese)](docs/VALIDATION.md)
 

@@ -257,6 +257,40 @@ def test_new_goal_clears_execution_index_and_old_path(planner):
         p.quiet(observations=1)
 
 
+@pytest.mark.parametrize('planner', [{'replan_interval': '.inf',
+                                     'replan_distance': '.inf'}], indirect=True)
+def test_active_far_goal_heartbeat_with_disabled_forced_replanning(planner):
+    """Infinite thresholds preserve active identity heartbeats and obstacle-triggered searches."""
+    p = planner
+    p.observe()
+    first = len(p.results)
+    p.goal()
+    initial = p.outcome(first, PlanResult.REACH_END)
+    p.wait(lambda: len(p.paths) == 1)
+    deadline = time.monotonic() + 3.3
+    while time.monotonic() < deadline:
+        # Movement beyond the default distance trigger must also leave the safe curve intact.
+        p.observe(position=(1.2, 0., 1.))
+    searches = [r for r in p.results[first:] if r.target_id]
+    heartbeats = [r for r in p.results[first:] if not r.target_id]
+    assert searches == [initial]
+    assert len(p.paths) == 1 and len(heartbeats) >= 3
+    assert all(r.status == PlanResult.WAITING_FOR_INPUT and r.planning_ms == 0
+               and not r.segments and not r.trajectory.points
+               and r.planner_session == initial.planner_session
+               and r.goal_revision == initial.goal_revision for r in heartbeats)
+    assert all(a.sequence < b.sequence for a, b in zip(heartbeats, heartbeats[1:]))
+
+    blocker = min(legacy_samples(initial)[::40], key=lambda xyz: abs(xyz[0]-2.))
+    first = len(p.results)
+    p.observe(points=((-20., -20., 1.), blocker), position=(1.2, 0., 1.))
+    detour = p.outcome(first, PlanResult.REACH_END)
+    assert detour.target_id == initial.target_id and detour.goal_revision == initial.goal_revision
+    assert detour.trajectory.points[0].transforms[0].translation.x == pytest.approx(1.2)
+    assert any(abs(t.transforms[0].translation.y) > .1 or
+               abs(t.transforms[0].translation.z-1.) > .1 for t in detour.trajectory.points)
+
+
 @pytest.mark.parametrize('planner', [None], indirect=True)
 def test_default_interval_refreshes_without_cloud_or_index_advance(planner):
     """Default 0.2 s refresh repeats a safe plan even with a stationary execution index."""

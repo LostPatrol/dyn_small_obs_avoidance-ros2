@@ -1,4 +1,4 @@
-# Shared Odin/planner defaults and native autonomous bridge interface; no hardware is launched.
+# Shared original-value comparison profile and native autonomous bridge interface; no hardware is launched.
 # Values are read at startup: restart the node to apply edits. Units below are SI.
 # Bounds/clearance are example planning settings, not a calibrated vehicle safety envelope.
 path_planning:
@@ -7,9 +7,9 @@ path_planning:
     planning_frame: odom
     # Hz, finite and positive (at most 1000): timer checks for replanning and input-loss diagnostics.
     planning_rate: 10.0
-    # Seconds, >0: replan after this time since the last attempt (0.2 gives nominal 5 Hz).
+    # Seconds, >0: time since the last attempt; .inf disables this forced trigger only.
     replan_interval: 0.2
-    # Metres, >0: replan when actual 3D position moves at least this far from the last attempt.
+    # Metres, >0: actual 3D displacement since the last attempt; .inf disables this forced trigger only.
     replan_distance: 1.0
     # Seconds, >0: maximum steady-clock reception age for cloud and odometry.
     # In ros mode the same limit also applies to header age; source time may lead by at most 0.05 s.
@@ -47,30 +47,30 @@ path_planning:
     # Used only by explicit core init=true and legacy execution-index replans; measured-state plans use init=false.
     search.init_max_tau: 0.8
     # Legacy scalar caps, m/s and m/s² per axis; directional limits below also apply.
-    search.max_vel: 1.0
+    search.max_vel: 2.0
     search.max_acc: 2.0
     # Avoidance-only limits: single source for native planning and execution result metadata.
     # Horizontal vector norms and vertical absolute limits; straight control has its own config.
-    search.max_vel_xy: 1.0  # m/s
-    search.max_vel_z: 0.2  # m/s
+    search.max_vel_xy: 2.0  # m/s; this comparison profile retains the current horizontal norm rule.
+    search.max_vel_z: 2.0  # m/s
     search.max_acc_xy: 2.0  # m/s²; original scalar was per-axis, not a horizontal norm.
     search.max_acc_z: 2.0  # m/s²
     # Positive time penalty in integral(||acceleration||² + w_time) dt; larger favors shorter durations.
     search.w_time: 10.0
     # Extra cost per metre of accumulated up/down travel; 0 restores the legacy search.
     # With w_time=10, one vertical metre adds the same cost as one second of time.
-    search.vertical_distance_weight: 10.0
+    search.vertical_distance_weight: 0.0
     # Meters, >0: displacement from start that permits a partial REACH_HORIZON result, not path length.
     search.horizon: 100.0
-    # Positive heuristic weight; 1 reduces greedy detours, without guaranteeing optimality.
-    search.lambda_heu: 1.0
+    # Positive heuristic weight; 5 matches the selected default-value comparison, not the old tie bug.
+    search.lambda_heu: 5.0
     # Meters, >0: position hash cell size; distinct velocities can be merged within a spatial cell.
     search.resolution: 0.1
     # Seconds, >0: hash time-bin width for core dynamic=true; unused by the current ROS wrapper.
     search.time_resolution: 0.8
     # Meters, >0: ROS1 SAFE_DIST; reject nearest stored centroid distances strictly below this value.
     # No extra voxel/sampling inflation; this does not guarantee clearance from every raw point.
-    search.safe_distance: 0.25
+    search.safe_distance: 0.45
     # Meters, >0: voxel edge for accumulated clouds; matches ROS1's 0.1 m leaf size.
     search.voxel_size: 0.1
     # Meters, >0 and <=safe_distance: terminal-shot and geometry-service sampling travel interval.
@@ -81,15 +81,15 @@ path_planning:
     search.search_budget: 0.3
     # At least 2 search nodes, preallocated at construction; exhausted searches return NODE_LIMIT.
     search.allocate_num: 100000
-    # Accepted clouds per bank, >=1. Two banks alternate; history lasts roughly 20-40 updates here.
-    # At 10 Hz this is about 2-4 seconds, not a time-based expiry or moving-object prediction.
-    search.tree_period: 20
+    # Accepted clouds per bank, >=1. Two banks alternate; history lasts roughly 50-100 updates here.
+    # At 10 Hz this is about 5-10 seconds, not a time-based expiry or moving-object prediction.
+    search.tree_period: 50
     # >=1: cap on input-cloud size and combined filtered map size; exceeding it invalidates the map.
     search.max_cloud_points: 500000
     # Meters: inclusive world-frame [x,y,z] bounds, each lower coordinate strictly below upper.
     # Shared by primitives and terminal curves; this volume is not a sensor-coverage declaration.
-    search.lower: [-50.0, -50.0, -2.0]
-    search.upper: [50.0, 50.0, 10.0]
+    search.lower: [-20.0, -20.0, 0.2]
+    search.upper: [20.0, 20.0, 1.3]
 
 # Entry-specific defaults consumed by the independent launch files.
 odin_launch:

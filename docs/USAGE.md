@@ -111,12 +111,12 @@ source install/setup.bash
 ros2 launch path_planning planner.launch.py \
   cloud:=/cloud_registered odom:=/Odometry goal:=/goal
 ros2 topic pub --once /goal geometry_msgs/msg/PoseStamped \
-  '{header: {frame_id: camera_init}, pose: {position: {x: 4.0, y: 0.0, z: 1.0}, orientation: {w: 1.0}}}'
+  '{header: {frame_id: odom}, pose: {position: {x: 4.0, y: 0.0, z: 1.0}, orientation: {w: 1.0}}}'
 ros2 topic echo /plan_result
 ```
 
 配置模板位于 [planner.yaml](../path_planning/config/planner.yaml)。复制到外部路径修改后使用
-`config:=/absolute/path/planner.yaml`。默认 frame 为 `camera_init`，默认高度范围 `[0.2,10.0] m`；
+`config:=/absolute/path/planner.yaml`。默认 frame 为 `odom`，公共配置高度范围 `[0.2,1.3] m`；
 按实际坐标系设置 `search.lower/upper`，不要为让测试通过而修改实测点云或伪造机体高度。
 节点不做 TF 转换；三个输入必须已经在同一固定世界系，frame_id 必须精确匹配，不接受带前导 `/` 的别名。
 
@@ -134,15 +134,15 @@ RViz已显示的路径会在失败时保留，直至下一次成功或用户清�
 判断当前规划是否有效必须读取 `/plan_result`，不能依据预览是否还在。
 参数在启动时读取；修改配置后重启节点。
 
-`search.vertical_distance_weight` 是每米累计竖直路程的额外代价，公共YAML默认10，
-设0恢复原搜索行为。原代价为加速度平方积分加时间代价，新项为
+`search.vertical_distance_weight` 是每米累计竖直路程的额外代价，公共YAML当前设0，
+关闭该新增代价。原代价为加速度平方积分加时间代价，新项为
 `weight * integral(abs(vz) dt)`；上升再下降分别累计。默认 `w_time=10` 时，
 额外上下移动1米等价于增加1秒的时间代价，仍允许必要升降。
 普通原语精确累计竖直路程；新增高度差启发项因诱发反复升降暂时注释，保留原启发式。
 终端三次曲线比较现有时长候选的
 完整代价，并与搜索队列比较。沿用加权A*，不保证全局最优或权重增大时每个场景都单调变平。
-公共YAML、core和节点默认 `lambda_heu=1`，降低贪心程度；只乘一次 `1.0001` 平局微调因子，
-有效启发倍率为 `1.0001`。显式 YAML / CLI 仍可覆盖默认值，修改后重启生效。
+公共YAML当前 `lambda_heu=5`，裸core/节点默认仍为1；只乘一次 `1.0001` 平局微调因子，
+公共配置的有效启发倍率为 `5.0005`。显式 YAML / CLI 仍可覆盖默认值，修改后重启生效。
 启发时长下界按水平范数/竖直方向速度限额的一半估计；这个时长约束可能高估剩余代价，
 因此默认 `lambda_heu=1` 仍不保证启发可采纳或搜索最优，位置 hash 还会合并不同速度状态。
 裸C++/节点默认权重0；使用公共YAML或显式传入 `search.vertical_distance_weight:=10.0` 启用。
@@ -151,8 +151,8 @@ RViz已显示的路径会在失败时保留，直至下一次成功或用户清�
 配置模板逐项标注了单位、约束与主要影响。`search.*` 默认值也在
 [`SearchConfig`](../path_searching/include/path_searching/kinodynamic_astar.h) 中提供，
 便于直接调用C++库；维护默认值时应同时核对YAML与头文件。
-ROS配置模板的搜索预算现为0.3秒；直接调用核心库的默认预算仍为0.08秒。
-benchmark默认也读取该安装模板，不再隐式使用核心0.08秒默认值。
+ROS配置模板和直接调用核心库的默认搜索预算均为0.3秒。
+benchmark默认也读取安装模板。公共配置的完整值及作用见[参数说明](planner_parameters.md)。
 初始固定加速度时长仅用于核心显式init=true及旧路径索引模式；实际状态重规划直接选择加速度。
 时间索引分辨率仅用于核心dynamic=true模式。
 它们不会让当前ROS节点自动启用动态障碍预测。
@@ -167,6 +167,8 @@ benchmark默认也读取该安装模板，不再隐式使用核心0.08秒默认�
 第0、40、80……点，安全则复用，受阻才搜索。距目标小于0.3m时不做点云重规划。
 此外，默认距上次实际尝试经过0.2秒（名义5Hz）或移动1米时，从实际里程计位置/速度重规划，
 绕过执行索引节流。`planning_rate`默认10Hz，控制定时检查及输入失效诊断；检查和搜索耗时可延后触发。
+将 `replan_interval` 或 `replan_distance` 设为正无穷 `.inf` 只关闭对应的强制触发。
+原生每秒身份心跳独立于重规划，活动远目标在等待期间同样保持可见。
 launch的`time_index`默认映射至`/demo_node/trajectory_time_index`：提供索引时保留原作者
 绝对索引差<10节流，以及旧路径index+3与差分速度；不提供时使用实际里程计位置和三轴速度。
 该缓存按0.01s采样，公共输出仍使用`sample_step`。仅旧路径索引模式先以零初始加速度搜索，
@@ -208,10 +210,10 @@ Odin入口可在YAML的`odin_launch.ros__parameters.odometry_twist_in_body`覆�
 
 1. 这是基于障碍点的加权运动学 A*；未观测空间仍按上游假设可通行。
    非空地图只表示有障碍观测，不表示完整 FOV 或自由空间证明。空图明确返回未知/失败。
-2. 双树每 `tree_period=20` 个有效输入切换一组；点最多保留约两个周期。
-   10 Hz 输入时可能保留约 2～4 s 历史障碍；动态物体消失不等于立即消除残影。
+2. 公共配置双树每 `tree_period=50` 个有效输入切换一组；点最多保留约两个周期。
+   10 Hz 输入时可能保留约 5～10 s 历史障碍；动态物体消失不等于立即消除残影。
    没有动态障碍跟踪或未来运动预测，不能宣称复现论文 20 mm/50 Hz 飞行效果。
-3. 最大速度/加速度是**逐轴**约束；三维合速度最大可达逐轴值的 √3 倍。
+3. 当前限额同时包含水平范数、竖直绝对值及scalar逐轴约束；公共配置速度/加速度均设2。
    不是限 jerk 轨迹、全局最优搜索或概率占据地图。
 4. 碰撞半径为 `safe_distance`，默认0.45 m，与ROS1的 `SAFE_DIST` 相同。
    最近KD-Tree点距离严格小于该值才拒绝；0.1 m体素和0.05 m采样间距不另增加半径。
@@ -276,7 +278,7 @@ ros2 topic echo /kino_path --once
 不能通过缩小安全距离或删除近身障碍物来宣称台架规划成功。
 
 每次重启规划器都需要重新发目标：目标只保存在当前进程，不跨进程持久化。
-未设置或取消目标时保持idle，每秒发布一次status=9、空target_id的身份心跳；
+未设置或取消目标时保持idle；健康输入下活动目标等待重规划时也每秒发布status=9、空target_id身份心跳；
 它只显示当前planner_session，不搜索、不包含轨迹。目标规划结果携带实际target_id。
 若RViz的Pose显示也订阅了目标，CLI `--once` 默认只等一个订阅者，不能据此确认规划器已收到。
 当前有RViz和规划器两个目标订阅者时，使用 `--once -w 2 --keep-alive 3` 等双方匹配后发送；
