@@ -49,7 +49,7 @@ Run a synthetic pole-avoidance example without a sensor or flight controller:
 ```
 
 The script starts and stops the planner automatically, and reports planning results and timing.
-It loads the same installed `planner.yaml` as the regular launch (300 ms search budget).
+It loads the same installed `planner.yaml` as the regular launch (500 ms search budget).
 Use `--config /absolute/path/planner.yaml` or an explicit `--search-budget 0.08` / `0.3` for comparisons.
 It tests planning with a stationary starting position; it does not simulate a vehicle following the path.
 See the [RViz2 instructions](docs/USAGE.md#rviz2-可视化) to display the obstacle cloud and planned path.
@@ -120,7 +120,7 @@ could repeatedly postpone steering. The optional legacy execution-index mode ret
 Override the Odin convention in `odin_launch.ros__parameters.odometry_twist_in_body` in YAML;
 an explicit `odometry_twist_in_body:=true/false` launch argument takes precedence.
 
-The shared YAML sets `search.vertical_distance_weight: 0.0` for the selected original-value profile.
+The shared YAML sets `search.vertical_distance_weight: 10.0` for the current tuning profile.
 A positive weight adds cost per metre of accumulated up/down travel, favouring horizontal detours when other costs are similar.
 Primitives and terminal cubic candidates include this cost. The added height-difference
 heuristic is temporarily disabled because it caused repeated vertical reversals.

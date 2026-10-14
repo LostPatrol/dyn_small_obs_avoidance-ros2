@@ -1,4 +1,4 @@
-# Shared original-value comparison profile and native autonomous bridge interface; no hardware is launched.
+# Shared user-tuned comparison profile and native autonomous bridge interface; no hardware is launched.
 # Values are read at startup: restart the node to apply edits. Units below are SI.
 # Bounds/clearance are example planning settings, not a calibrated vehicle safety envelope.
 path_planning:
@@ -13,7 +13,7 @@ path_planning:
     replan_distance: 1.0
     # Seconds, >0: maximum steady-clock reception age for cloud and odometry.
     # In ros mode the same limit also applies to header age; source time may lead by at most 0.05 s.
-    input_timeout: 0.5
+    input_timeout: 1.0
     # receive mode preserves device timestamps but cannot measure upstream acquisition/transport delay.
     stamp_clock: receive  # ros: validate header age; receive: explicitly accept unknown sensor-clock offset
     # Native alternating KD-tree accumulation; no bridge snapshot profile.
@@ -59,7 +59,7 @@ path_planning:
     search.w_time: 10.0
     # Extra cost per metre of accumulated up/down travel; 0 restores the legacy search.
     # With w_time=10, one vertical metre adds the same cost as one second of time.
-    search.vertical_distance_weight: 0.0
+    search.vertical_distance_weight: 10.0
     # Meters, >0: displacement from start that permits a partial REACH_HORIZON result, not path length.
     search.horizon: 100.0
     # Positive heuristic weight; 5 matches the selected default-value comparison, not the old tie bug.
@@ -70,7 +70,7 @@ path_planning:
     search.time_resolution: 0.8
     # Meters, >0: ROS1 SAFE_DIST; reject nearest stored centroid distances strictly below this value.
     # No extra voxel/sampling inflation; this does not guarantee clearance from every raw point.
-    search.safe_distance: 0.45
+    search.safe_distance: 0.35
     # Meters, >0: voxel edge for accumulated clouds; matches ROS1's 0.1 m leaf size.
     search.voxel_size: 0.1
     # Meters, >0 and <=safe_distance: terminal-shot and geometry-service sampling travel interval.
@@ -78,18 +78,18 @@ path_planning:
     search.collision_step: 0.05
     # Seconds, (0,60]: cooperative search budget, excluding map building and result serialization.
     # A difficult event-triggered search can exceed this cooperative budget; output is not periodic.
-    search.search_budget: 0.3
+    search.search_budget: 0.5
     # At least 2 search nodes, preallocated at construction; exhausted searches return NODE_LIMIT.
     search.allocate_num: 100000
-    # Accepted clouds per bank, >=1. Two banks alternate; history lasts roughly 50-100 updates here.
-    # At 10 Hz this is about 5-10 seconds, not a time-based expiry or moving-object prediction.
-    search.tree_period: 50
+    # Accepted clouds per bank, >=1. Two banks alternate; history lasts roughly 20-40 updates here.
+    # At 10 Hz this is about 2-4 seconds, not a time-based expiry or moving-object prediction.
+    search.tree_period: 20
     # >=1: cap on input-cloud size and combined filtered map size; exceeding it invalidates the map.
     search.max_cloud_points: 500000
     # Meters: inclusive world-frame [x,y,z] bounds, each lower coordinate strictly below upper.
     # Shared by primitives and terminal curves; this volume is not a sensor-coverage declaration.
     search.lower: [-20.0, -20.0, 0.2]
-    search.upper: [20.0, 20.0, 1.3]
+    search.upper: [20.0, 20.0, 1.8]
 
 # Entry-specific defaults consumed by the independent launch files.
 odin_launch:
