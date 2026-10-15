@@ -47,6 +47,7 @@
 
 ## 仓库身份与路径
 
+- 根目录`agent/`仅保存在本地，由`.gitignore`中的`/agent/`忽略；报告等文件不再纳入Git跟踪。
 - GitHub仓库名为`LostPatrol/dyn_small_obs_avoidance-ros2-modified`，根目录为维护中的修改版；参考适配保存在`upstream-ros2-port/dyn_small_obs_avoidance-main`。
 - 开发机及飞机项目根路径继续使用`dyn_small_obs_avoidance-ros2`，不要因远程改名移动部署目录或重建。开发机origin已更新；refresh、new及hp-desktop的已有克隆下次连接时需将origin更新为新URL，无需因改名重启服务。
 - 参考目录随改名首次纳入Git；本地已有参考版build/install缓存可能含旧路径，需要运行参考版时在独立工作区重新构建，不使用旧安装产物。
